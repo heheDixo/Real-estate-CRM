@@ -1,11 +1,18 @@
 import datetime
 import random
+from typing import Any
 import requests
 import config
 from models.prospect     import Prospect
 from models.enrichment   import EnrichmentResult
 from models.score_result import ScoreResult
-from models.icp_profile  import ICPProfile
+
+# ICPProfile lived in the wizard flow which has been retired. The few methods
+# on the writer that referenced it (generate_email, generate_linkedin,
+# generate_followup) are not invoked by the morning research pipeline —
+# scheduler._generate_draft builds prompts directly and bypasses them. The
+# annotations remain as Any so the file imports without that module.
+ICPProfile = Any
 
 
 class OutreachWriter:
@@ -90,6 +97,52 @@ class OutreachWriter:
                 return cleaned[:300] if len(cleaned) > 300 else cleaned
 
         return self._fallback_linkedin(prospect, enrichment, score)
+
+    def generate(self, brief: str,
+                  tone_prefix: str = "",
+                  tone_injection: str = ""):
+        """
+        Lightweight free-form draft generation used by the tone-variant
+        verification CLI. Returns a small object with email_subject and
+        email_body attributes.
+
+        Args:
+            brief:          plain-text brief (company, contact, signals, hook)
+            tone_prefix:    optional system-prompt prefix from
+                            config.TONE_VARIANT_PREFIXES
+            tone_injection: optional style block from tone_learner
+
+        Returns:
+            namespace-like object with .email_subject and .email_body
+        """
+        from types import SimpleNamespace
+
+        prefix = (tone_prefix + "\n\n") if tone_prefix else ""
+        injection = (tone_injection + "\n\n") if tone_injection else ""
+
+        prompt = (
+            f"[INST] {prefix}{config.EMAIL_SYSTEM_PROMPT}\n\n"
+            f"{injection}"
+            f"Brief:\n{brief}\n\n"
+            f"Now write the email. Start with 'Subject:' on line 1.\n"
+            f"[/INST]"
+        )
+
+        subject, body = "", ""
+        if self.available:
+            raw = self._call_hf_api(prompt)
+            if raw:
+                subject, body = self._parse_email(raw)
+
+        if not subject or not body:
+            subject = subject or f"Quick thought — {brief.splitlines()[0][:60]}"
+            body    = body    or (
+                f"{brief}\n\n"
+                f"Worth a short conversation?\n\n"
+                f"{config.AGENT_NAME}\n{config.FIRM_NAME}"
+            )
+
+        return SimpleNamespace(email_subject=subject, email_body=body)
 
     def generate_followup(self, prospect: Prospect,
                            enrichment: EnrichmentResult,
@@ -508,3 +561,6 @@ class OutreachWriter:
             f"{config.FIRM_NAME}"
         )
         return subject, body
+
+# Compatibility alias — the verification CLI imports DraftWriter
+DraftWriter = OutreachWriter

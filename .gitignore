@@ -1,32 +1,67 @@
-# Secrets — never commit
+# ── Secrets — NEVER commit ────────────────────────────────────────────────
 .env
 .env.local
 *.env
+!.env.example
 
-# Python
+# Google OAuth client secret + cached user tokens
+credentials.json
+data/gmail_token.json
+data/sheets_token.json
+data/calendar_token.json
+
+# ── Per-run pipeline output (regenerated daily) ──────────────────────────
+data/morning_run_*.json
+data/discovered_leads_*.json
+
+# ── Logs / transient state ───────────────────────────────────────────────
+data/error_log.json
+data/scheduler_log.json
+data/pipeline_progress.json
+*.log
+
+# ── Python ───────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+*.egg-info/
+build/
+dist/
 
-# Virtual environments
+# ── Virtual environments ─────────────────────────────────────────────────
 venv/
+.venv/
 env/
 ENV/
-.venv/
 
-# IDE / editor
+# ── Test / lint caches ───────────────────────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ── IDE / editor / OS ────────────────────────────────────────────────────
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
+*~
 .DS_Store
+Thumbs.db
 
-# Streamlit
+# ── Streamlit ────────────────────────────────────────────────────────────
 .streamlit/secrets.toml
 
-# Local test artefacts
-*.log
-*.csv
-!requirements.txt
+# ── Notebooks ────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── Misc local artefacts ─────────────────────────────────────────────────
+*.bak
+*.tmp
+
+# ── Claude Code local state ──────────────────────────────────────────────
+.claude/

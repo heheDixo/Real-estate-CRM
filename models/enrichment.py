@@ -28,9 +28,10 @@ class EnrichmentResult:
     Everything discovered about a prospect after the enrichment
     waterfall runs. Decorates a Prospect — does not replace it.
 
-    Three source blocks correspond to the three connectors:
+    Source blocks correspond to the connectors:
     - Apollo block:     firmographic depth
-    - Proxycurl block:  LinkedIn hiring signals
+    - Hiring block:     job/headcount signals (populated from mock data only —
+                        the live LinkedIn source has been removed)
     - NewsAPI block:    recent news signals
 
     Computed fields at the bottom are what the scorer reads.
@@ -41,7 +42,7 @@ class EnrichmentResult:
     # Identity 
     prospect_id: str = ""            # matches Prospect.domain
     enriched_at: str = ""            # ISO timestamp
-    sources_used: list = field(default_factory=list)   # ["apollo","proxycurl","newsapi"]
+    sources_used: list = field(default_factory=list)   # ["apollo","newsapi"]
     sources_failed: list = field(default_factory=list) # which APIs returned errors
 
     # Apollo block 
@@ -57,7 +58,7 @@ class EnrichmentResult:
     annual_revenue: int = 0           # USD estimate
     sic_codes: list = field(default_factory=list)
 
-    # Proxycurl block
+    # Hiring block (mock-data only — LinkedIn source removed)
     # LinkedIn hiring signals — the strongest space-need proxy.
     job_postings: list = field(default_factory=list)    # list of JobPosting objects
     total_jobs_posted: int = 0
@@ -129,7 +130,7 @@ class EnrichmentResult:
         Calculate a 0-100 hiring velocity score.
         Formula: (jobs_in_target_geo / max(headcount_current, 1)) * 100
         Capped at 100.
-        Called by pipeline/enrichment.py after Proxycurl data is loaded.
+        Called by pipeline/enrichment.py after enrichment data is loaded.
         """
         if self.headcount_current > 0:
             raw = (self.total_jobs_posted / self.headcount_current) * 100

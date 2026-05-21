@@ -12,13 +12,28 @@ load_dotenv()
 
 HF_TOKEN            = os.getenv("HF_TOKEN", "")
 APOLLO_API_KEY      = os.getenv("APOLLO_API_KEY", "")
-PROXYCURL_API_KEY   = os.getenv("PROXYCURL_API_KEY", "")
 NEWSAPI_KEY         = os.getenv("NEWSAPI_KEY", "")
+HUNTER_API_KEY      = os.getenv("HUNTER_API_KEY", "")
+FIRECRAWL_API_KEY   = os.getenv("FIRECRAWL_API_KEY", "")
 
-# Gmail
+# Gmail (SMTP)
 GMAIL_ADDRESS       = os.getenv("GMAIL_ADDRESS", "")
 GMAIL_APP_PASSWORD  = os.getenv("GMAIL_APP_PASSWORD", "")
+GMAIL_SENDER        = os.getenv("GMAIL_SENDER", "") or GMAIL_ADDRESS
 DEMO_RECIPIENT      = os.getenv("DEMO_RECIPIENT", "")
+
+# Google OAuth (Gmail drafts, Sheets, Calendar — one credentials file)
+GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json")
+SHEETS_SPREADSHEET_ID   = os.getenv("SHEETS_SPREADSHEET_ID", "")
+CALENDAR_ID             = os.getenv("CALENDAR_ID", "primary")
+
+# Morning research scheduler
+RESEARCH_CRON_HOUR   = int(os.getenv("RESEARCH_CRON_HOUR",   "5"))
+RESEARCH_CRON_MINUTE = int(os.getenv("RESEARCH_CRON_MINUTE", "0"))
+DIGEST_SEND_HOUR     = int(os.getenv("DIGEST_SEND_HOUR",     "7"))
+BROKER_EMAIL         = os.getenv("BROKER_EMAIL", "")
+TIMEZONE             = os.getenv("TIMEZONE", "America/New_York")
+START_SCHEDULER      = os.getenv("START_SCHEDULER", "false").lower() == "true"
 
 # Agent identity
 AGENT_NAME          = os.getenv("AGENT_NAME",  "Michael Hartley")
@@ -34,12 +49,18 @@ AGENCY_ACCENT = "#2ECC71"   # emerald green — positive signals, tier badges
 # Set to True only if the corresponding key is present.
 # Used by connectors to decide: real API vs mock data.
 APOLLO_AVAILABLE    = bool(APOLLO_API_KEY)
-PROXYCURL_AVAILABLE = bool(PROXYCURL_API_KEY)
 NEWSAPI_AVAILABLE   = bool(NEWSAPI_KEY)
+HUNTER_AVAILABLE    = bool(HUNTER_API_KEY)
+FIRECRAWL_AVAILABLE = bool(FIRECRAWL_API_KEY)
 HF_AVAILABLE        = bool(HF_TOKEN)
+GMAIL_AVAILABLE     = bool(GMAIL_ADDRESS and GMAIL_APP_PASSWORD)
+GOOGLE_OAUTH_AVAILABLE = bool(GOOGLE_CREDENTIALS_PATH) and os.path.exists(GOOGLE_CREDENTIALS_PATH)
 
 
-HF_API_BASE     = "https://api-inference.huggingface.co/models"
+# HuggingFace moved the old api-inference.huggingface.co endpoint to the
+# new router URL in 2025. Same model ID, same payload, but the host has to
+# match what's currently in DNS.
+HF_API_BASE     = "https://router.huggingface.co/hf-inference/models"
 SCORING_MODEL   = "facebook/bart-large-mnli"
 WRITING_MODEL   = "mistralai/Mistral-7B-Instruct-v0.2"
 BRIEFING_MODEL  = "mistralai/Mistral-7B-Instruct-v0.2"
@@ -439,3 +460,274 @@ TIER_CONFIG = {
         "action":     "Monitor — revisit in 90 days",
     },
 }
+
+# BLOCK 8 — Plain-English explanations for each scoring dimension
+#
+# Used by pages/2_prospect_found.py to translate a numeric score into a
+# sentence the broker can read in a glance. {placeholders} are filled in
+# from the EnrichmentResult — see _format_explanation() on page 2.
+
+SCORE_EXPLANATIONS = {
+    "hiring_velocity": {
+        "high":   "they posted {jobs} jobs in the last 60 days against a {headcount}-person team — that velocity usually shows up in space planning",
+        "medium": "their hiring pace is steady ({jobs} open roles for {headcount} employees) — keep watching",
+        "low":    "only {jobs} open roles for a {headcount}-person team — no urgency on space from hiring alone",
+    },
+    "funding_timing": {
+        "high":   "they raised {funding_type} {months_since_funding} months ago — right in the 12–18 month deployment window",
+        "medium": "funding was {months_since_funding} months ago — close to the deployment window but not centre of it",
+        "low":    "no recent funding on record or funding is outside the typical deployment window",
+    },
+    "expansion_news": {
+        "high":   "they have publicly announced an expansion — that is the strongest possible space signal",
+        "medium": "some growth-adjacent news but no explicit expansion announcement",
+        "low":    "no public expansion announcements detected in the last 6 months",
+    },
+    "lease_expiry": {
+        "high":   "relocation or office-change signals detected in the last 90 days",
+        "medium": "office-related news but no clear lease expiry signal",
+        "low":    "no lease expiry signal — they may have recently signed",
+    },
+    "decision_maker": {
+        "high":   "the named contact ({title}) sits in operations or the C-suite and likely owns real estate decisions",
+        "medium": "the contact is senior but real-estate authority is not certain",
+        "low":    "the contact may not have authority over real estate — verify before investing heavily",
+    },
+}
+
+# BLOCK 9 — Research agent signal labels (zero-shot on bart-large-mnli)
+#
+# Used by research_agent.py to classify the day's news and job postings
+# into CRE-relevant signals. Each label is a candidate hypothesis the
+# article text is scored against.
+
+RESEARCH_SIGNAL_LABELS = [
+    "company is expanding to new office locations",
+    "company is hiring aggressively and growing headcount",
+    "company recently raised funding and has capital to deploy",
+    "company office lease may be expiring soon",
+    "company needs more office space",
+]
+
+RESEARCH_SIGNAL_LABEL_TYPES = {
+    "company is expanding to new office locations":         "expansion",
+    "company is hiring aggressively and growing headcount": "hiring",
+    "company recently raised funding and has capital to deploy": "funding",
+    "company office lease may be expiring soon":            "lease",
+    "company needs more office space":                       "space_need",
+}
+
+# Research tier thresholds (different from scoring tiers — research is daily)
+RESEARCH_TIER_HOT     = 75
+RESEARCH_TIER_WARM    = 50
+RESEARCH_SKIP_BELOW   = 30
+
+# Tone variants used on page 3 (draft review).
+# Each prefix is prepended verbatim to the system prompt so Mistral biases
+# its style/structure toward the named variant. Keep them tight — the model
+# weights early instructions heavily.
+TONE_VARIANT_PREFIXES = {
+    "Direct": (
+        "You are writing a cold outreach email for a commercial real estate broker. "
+        "RULES: Under 80 words total. No greetings like 'I hope this finds you well'. "
+        "Lead with the single strongest signal in the first sentence. "
+        "One sentence CTA at the end — ask a yes/no or short-answer question. "
+        "Never use: leverage, circle back, touching base, synergy, excited, thrilled, pleased. "
+        "No fluff. No pleasantries. Broker-to-executive tone."
+    ),
+    "Warm": (
+        "You are writing a cold outreach email for a commercial real estate broker. "
+        "RULES: 90-120 words. Open by acknowledging something specific about their "
+        "company — a milestone, an announcement, a hire — before mentioning space. "
+        "Softer ask: 'happy to share what we're seeing' or "
+        "'worth a quick call to explore'. Conversational but professional. "
+        "One paragraph. No bullet points. "
+        "Never use: leverage, circle back, touching base, synergy."
+    ),
+    "Consultative": (
+        "You are writing a cold outreach email for a commercial real estate broker "
+        "who leads with market insight. "
+        "RULES: 100-130 words. Open with a market data point or trend observation "
+        "relevant to their sector — NOT about their specific company. "
+        "Position yourself as a market expert, not a vendor. "
+        "Then connect the market insight to their company's situation. "
+        "CTA: offer to share a market brief or data point, not a sales call. "
+        "Tone: peer-level, analytical, no hard sell. "
+        "Never use: leverage, circle back, touching base, synergy, excited, thrilled."
+    ),
+}
+
+
+# BLOCK 10 — Dark theme styling
+#
+# A single CSS block injected at the top of every page via st.markdown. Keeps
+# all visual styling in one place so theme tweaks land everywhere at once.
+
+TIER_COLORS = {
+    "hot":     {"bg": "#3d0f0f", "text": "#f85149", "border": "#5a1a1a",
+                "bar": "#f85149", "emoji": "🔥"},
+    "warm":    {"bg": "#3d2800", "text": "#d29922", "border": "#5a3d00",
+                "bar": "#d29922", "emoji": "☀"},
+    "nurture": {"bg": "#0d2136", "text": "#58a6ff", "border": "#1c3a5e",
+                "bar": "#3b82f6", "emoji": "❄"},
+}
+
+DARK_THEME_CSS = """
+<style>
+/* App background */
+.stApp { background-color: #0d1117; color: #e6edf3; }
+.block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
+
+/* Hide default Streamlit chrome */
+#MainMenu { visibility: hidden; }
+footer { visibility: hidden; }
+header { visibility: hidden; }
+.stDeployButton { display: none; }
+
+/* Sidebar */
+section[data-testid="stSidebar"] {
+    background-color: #161b22;
+    border-right: 1px solid #30363d;
+}
+section[data-testid="stSidebar"] * { color: #c9d1d9; }
+
+/* Sidebar page links */
+section[data-testid="stSidebar"] a[data-testid="stPageLink-NavLink"] {
+    color: #c9d1d9 !important;
+    background: transparent;
+    border-radius: 6px;
+    padding: 6px 8px;
+}
+section[data-testid="stSidebar"] a[data-testid="stPageLink-NavLink"]:hover {
+    background: #21262d;
+}
+
+/* Metric cards */
+div[data-testid="metric-container"] {
+    background-color: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 12px;
+}
+div[data-testid="metric-container"] label { color: #8b949e; font-size: 11px; }
+div[data-testid="metric-container"] div[data-testid="stMetricValue"] {
+    color: #e6edf3; font-size: 22px;
+}
+
+/* Buttons */
+.stButton > button {
+    background-color: #21262d;
+    border: 1px solid #30363d;
+    color: #e6edf3;
+    border-radius: 6px;
+    font-size: 13px;
+    transition: background 0.15s;
+}
+.stButton > button:hover { background-color: #2d333b; border-color: #484f58; }
+.stButton > button:focus { box-shadow: none; }
+.stButton > button[kind="primary"] {
+    background-color: #1d4ed8;
+    border-color: #1d4ed8;
+    color: #ffffff;
+}
+.stButton > button[kind="primary"]:hover { background-color: #2563eb; }
+
+/* Primary button override — wrap in div.primary-btn */
+.primary-btn .stButton > button {
+    background-color: #1d4ed8;
+    border-color: #1d4ed8;
+    color: #ffffff;
+}
+.primary-btn .stButton > button:hover { background-color: #2563eb; }
+
+/* Inputs */
+.stTextInput input, .stTextArea textarea, .stSelectbox > div > div {
+    background-color: #0d1117 !important;
+    border: 1px solid #30363d !important;
+    color: #e6edf3 !important;
+    border-radius: 6px !important;
+}
+
+/* Divider */
+hr { border-color: #30363d !important; }
+
+/* Tabs */
+.stTabs [data-baseweb="tab-list"] {
+    background-color: transparent;
+    border-bottom: 1px solid #30363d;
+    gap: 24px;
+}
+.stTabs [data-baseweb="tab"] {
+    color: #8b949e;
+    font-size: 13px;
+    background: transparent;
+}
+.stTabs [aria-selected="true"] {
+    color: #58a6ff !important;
+    border-bottom: 2px solid #3b82f6 !important;
+}
+
+/* Expander */
+details {
+    background-color: #161b22;
+    border: 1px solid #30363d !important;
+    border-radius: 6px;
+}
+summary { color: #8b949e; font-size: 13px; }
+
+/* Alerts */
+div[data-testid="stInfo"]    { background-color: #0d2136; border: 1px solid #1c3a5e; color: #58a6ff; }
+div[data-testid="stWarning"] { background-color: #2d1f00; border: 1px solid #5a3d00; color: #d29922; }
+div[data-testid="stSuccess"] { background-color: #0d2b1a; border: 1px solid #1a5e35; color: #3fb950; }
+div[data-testid="stError"]   { background-color: #2d0f0f; border: 1px solid #5a1a1a; color: #f85149; }
+
+/* Radio button pill styling */
+div[data-testid="stRadio"] > div {
+    flex-direction: row;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+div[data-testid="stRadio"] label {
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 20px;
+    padding: 4px 14px;
+    font-size: 12px;
+    color: #8b949e;
+    cursor: pointer;
+}
+div[data-testid="stRadio"] label:has(input:checked) {
+    background: #1d4ed8;
+    border-color: #1d4ed8;
+    color: #ffffff;
+}
+
+/* Spinner */
+.stSpinner > div { border-top-color: #3b82f6 !important; }
+
+/* Progress bar */
+div[data-testid="stProgress"] > div > div {
+    background-color: #1d4ed8;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0d1117; }
+::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+
+/* Captions */
+.stCaption, p, label, span { color: #8b949e; }
+h1, h2, h3, h4, h5 { color: #e6edf3; }
+
+/* DataFrame container (used by Sent Tracker fallback) */
+div[data-testid="stDataFrame"] {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+}
+
+/* Markdown links */
+a { color: #58a6ff; }
+a:hover { color: #79c0ff; }
+</style>
+"""

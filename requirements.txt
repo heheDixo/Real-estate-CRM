@@ -6,3 +6,17 @@ plotly==5.22.0
 faker==25.2.0
 Pillow==10.3.0
 huggingface_hub==0.23.2
+
+# ── Morning research pipeline ──────────────────────────────────
+apscheduler>=3.10.0
+feedparser>=6.0.10
+
+# ── Google integrations (Gmail / Sheets / Calendar) ────────────
+google-auth>=2.23.0
+google-auth-oauthlib>=1.1.0
+google-auth-httplib2>=0.1.1
+google-api-python-client>=2.100.0
+
+# ── Optional free data sources (graceful fallback if key absent) ──
+firecrawl-py>=0.0.5
+newsapi-python>=0.2.7
