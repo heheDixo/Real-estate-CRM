@@ -573,161 +573,488 @@ TIER_COLORS = {
 }
 
 DARK_THEME_CSS = """
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..900,0..100&family=Inter+Tight:wght@300..700&family=JetBrains+Mono:wght@400..700&display=swap" rel="stylesheet">
 <style>
-/* App background */
-.stApp { background-color: #0d1117; color: #e6edf3; }
-.block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
+/* ─────────────────────────────────────────────────────────────────────── */
+/*  CRE Outreach Intelligence — Editorial Terminal aesthetic                */
+/*  Type: Fraunces (display serif) · Inter Tight (body) · JetBrains Mono   */
+/*  Palette: bone on near-black with vermillion · gold · cobalt accents    */
+/* ─────────────────────────────────────────────────────────────────────── */
 
-/* Hide default Streamlit chrome */
-#MainMenu { visibility: hidden; }
-footer { visibility: hidden; }
-header { visibility: hidden; }
-.stDeployButton { display: none; }
+:root {
+    --bg-deep:        #0a0a0c;
+    --bg-surface:     #15161a;
+    --bg-elevated:    #1c1d22;
+    --border-faint:   #23252b;
+    --border:         #2a2c33;
+    --border-strong:  #3d4049;
+    --text-primary:   #ede9df;   /* bone */
+    --text-secondary: #a8acb5;
+    --text-muted:     #6f7178;
+    --text-data:      #c9c6bd;   /* slightly warmer for numeric */
 
-/* Sidebar */
-section[data-testid="stSidebar"] {
-    background-color: #161b22;
-    border-right: 1px solid #30363d;
+    /* Sharp accents — used sparingly */
+    --accent-vermillion: #ff5b3a;   /* hot */
+    --accent-gold:       #d4a548;   /* warm */
+    --accent-cobalt:     #5170c4;   /* nurture / info */
+    --accent-sage:       #86b169;   /* success */
+    --accent-rust:       #c2542d;   /* error */
+
+    --font-display: 'Fraunces', 'Iowan Old Style', Georgia, serif;
+    --font-body:    'Inter Tight', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono:    'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
 }
-section[data-testid="stSidebar"] * { color: #c9d1d9; }
 
-/* Sidebar page links */
+/* ── Ground / typography baseline ─────────────────────────────────────── */
+html, body, .stApp, [data-testid="stAppViewContainer"] {
+    background:
+        radial-gradient(ellipse 1200px 600px at 88% -10%,
+                        rgba(81,112,196,0.06) 0%, transparent 60%),
+        radial-gradient(ellipse 800px 400px at -5% 100%,
+                        rgba(255,91,58,0.04) 0%, transparent 50%),
+        var(--bg-deep) !important;
+    color: var(--text-primary);
+    font-family: var(--font-body);
+    font-feature-settings: "ss01", "cv11", "tnum";
+}
+
+.block-container {
+    padding-top: 1.4rem !important;
+    padding-bottom: 3rem !important;
+    max-width: 1480px !important;
+}
+
+#MainMenu, footer, header, .stDeployButton { display: none !important; visibility: hidden !important; }
+
+/* Headings — serif display with tight optical sizing */
+h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display);
+    color: var(--text-primary);
+    font-weight: 500;
+    font-variation-settings: "opsz" 144, "SOFT" 50;
+    letter-spacing: -0.012em;
+    line-height: 1.05;
+}
+h1 { font-size: 2.4rem; }
+h2 { font-size: 1.7rem; }
+h3 { font-size: 1.25rem; }
+
+p, span, label, .stCaption, div {
+    font-family: var(--font-body);
+    color: var(--text-secondary);
+}
+
+/* Tabular numerals everywhere numbers matter */
+.cre-mono, code, kbd {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+}
+
+/* ── Masthead (top of every page) ──────────────────────────────────────── */
+.cre-masthead {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 0 0 12px 0;
+    margin-bottom: 22px;
+    border-bottom: 1px solid var(--border);
+    position: relative;
+}
+.cre-masthead::after {
+    content: "";
+    position: absolute;
+    left: 0; right: 0; bottom: -4px;
+    height: 1px;
+    background: var(--border-faint);
+}
+.cre-wordmark {
+    font-family: var(--font-display);
+    font-variation-settings: "opsz" 144, "SOFT" 100;
+    font-weight: 600;
+    font-size: 22px;
+    color: var(--text-primary);
+    letter-spacing: -0.02em;
+}
+.cre-wordmark em {
+    font-style: italic;
+    font-variation-settings: "opsz" 144, "SOFT" 100;
+    color: var(--accent-vermillion);
+    font-weight: 400;
+}
+.cre-volume {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+}
+
+/* ── Sidebar ──────────────────────────────────────────────────────────── */
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #0e0f12 0%, var(--bg-deep) 100%);
+    border-right: 1px solid var(--border);
+}
+section[data-testid="stSidebar"] *, section[data-testid="stSidebar"] p {
+    color: var(--text-secondary);
+    font-family: var(--font-body);
+}
+section[data-testid="stSidebar"] h1,
+section[data-testid="stSidebar"] h2,
+section[data-testid="stSidebar"] h3 {
+    font-family: var(--font-display);
+    color: var(--text-primary);
+}
 section[data-testid="stSidebar"] a[data-testid="stPageLink-NavLink"] {
-    color: #c9d1d9 !important;
+    color: var(--text-secondary) !important;
     background: transparent;
-    border-radius: 6px;
-    padding: 6px 8px;
+    border-radius: 0;
+    padding: 8px 10px;
+    border-left: 2px solid transparent;
+    transition: all 0.18s ease;
 }
 section[data-testid="stSidebar"] a[data-testid="stPageLink-NavLink"]:hover {
-    background: #21262d;
+    background: var(--bg-surface);
+    border-left-color: var(--accent-vermillion);
+    color: var(--text-primary) !important;
 }
 
-/* Metric cards */
+/* ── Cards / surfaces ─────────────────────────────────────────────────── */
+.cre-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    padding: 18px 20px;
+    position: relative;
+    transition: border-color 0.2s ease, transform 0.2s ease;
+    animation: cre-fade-in 0.6s ease both;
+}
+.cre-card:hover {
+    border-color: var(--border-strong);
+    transform: translateY(-1px);
+}
+.cre-card.hot::before,
+.cre-card.warm::before,
+.cre-card.nurture::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 3px;
+}
+.cre-card.hot::before     { background: var(--accent-vermillion); }
+.cre-card.warm::before    { background: var(--accent-gold); }
+.cre-card.nurture::before { background: var(--accent-cobalt); }
+
+/* Staggered card reveal */
+.cre-card:nth-child(1) { animation-delay: 0.00s; }
+.cre-card:nth-child(2) { animation-delay: 0.05s; }
+.cre-card:nth-child(3) { animation-delay: 0.10s; }
+.cre-card:nth-child(4) { animation-delay: 0.15s; }
+.cre-card:nth-child(5) { animation-delay: 0.20s; }
+.cre-card:nth-child(6) { animation-delay: 0.25s; }
+.cre-card:nth-child(7) { animation-delay: 0.30s; }
+.cre-card:nth-child(8) { animation-delay: 0.35s; }
+
+@keyframes cre-fade-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Metric cards (Streamlit native + custom) ─────────────────────────── */
 div[data-testid="metric-container"] {
-    background-color: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 8px;
-    padding: 12px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 0;
+    padding: 14px 16px;
+    position: relative;
 }
-div[data-testid="metric-container"] label { color: #8b949e; font-size: 11px; }
+div[data-testid="metric-container"]::before {
+    content: "";
+    position: absolute; top: 0; left: 0; height: 1px; width: 28px;
+    background: var(--accent-vermillion);
+}
+div[data-testid="metric-container"] label {
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-weight: 500;
+}
 div[data-testid="metric-container"] div[data-testid="stMetricValue"] {
-    color: #e6edf3; font-size: 22px;
+    color: var(--text-primary);
+    font-family: var(--font-display);
+    font-variation-settings: "opsz" 144, "SOFT" 50;
+    font-size: 28px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
 }
 
-/* Buttons */
+/* ── Buttons ──────────────────────────────────────────────────────────── */
 .stButton > button {
-    background-color: #21262d;
-    border: 1px solid #30363d;
-    color: #e6edf3;
-    border-radius: 6px;
-    font-size: 13px;
-    transition: background 0.15s;
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    color: var(--text-primary);
+    border-radius: 0;
+    font-family: var(--font-body);
+    font-size: 12.5px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    padding: 6px 16px;
+    transition: all 0.18s ease;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
 }
-.stButton > button:hover { background-color: #2d333b; border-color: #484f58; }
-.stButton > button:focus { box-shadow: none; }
-.stButton > button[kind="primary"] {
-    background-color: #1d4ed8;
-    border-color: #1d4ed8;
-    color: #ffffff;
+.stButton > button:hover {
+    background: var(--text-primary);
+    color: var(--bg-deep);
+    border-color: var(--text-primary);
 }
-.stButton > button[kind="primary"]:hover { background-color: #2563eb; }
-
-/* Primary button override — wrap in div.primary-btn */
+.stButton > button:focus { box-shadow: none !important; }
+.stButton > button[kind="primary"],
 .primary-btn .stButton > button {
-    background-color: #1d4ed8;
-    border-color: #1d4ed8;
-    color: #ffffff;
+    background: var(--accent-vermillion);
+    border-color: var(--accent-vermillion);
+    color: var(--bg-deep);
+    font-weight: 600;
 }
-.primary-btn .stButton > button:hover { background-color: #2563eb; }
-
-/* Inputs */
-.stTextInput input, .stTextArea textarea, .stSelectbox > div > div {
-    background-color: #0d1117 !important;
-    border: 1px solid #30363d !important;
-    color: #e6edf3 !important;
-    border-radius: 6px !important;
+.stButton > button[kind="primary"]:hover,
+.primary-btn .stButton > button:hover {
+    background: var(--text-primary);
+    border-color: var(--text-primary);
+    color: var(--accent-vermillion);
 }
 
-/* Divider */
-hr { border-color: #30363d !important; }
+/* ── Inputs ───────────────────────────────────────────────────────────── */
+.stTextInput input, .stTextArea textarea,
+.stSelectbox > div > div, .stNumberInput input {
+    background: var(--bg-surface) !important;
+    border: 1px solid var(--border) !important;
+    color: var(--text-primary) !important;
+    border-radius: 0 !important;
+    font-family: var(--font-body) !important;
+    font-size: 13.5px !important;
+}
+.stTextInput input:focus, .stTextArea textarea:focus {
+    border-color: var(--accent-vermillion) !important;
+    box-shadow: 0 0 0 1px var(--accent-vermillion) !important;
+}
 
-/* Tabs */
+/* ── Tabs ─────────────────────────────────────────────────────────────── */
 .stTabs [data-baseweb="tab-list"] {
-    background-color: transparent;
-    border-bottom: 1px solid #30363d;
-    gap: 24px;
+    background: transparent;
+    border-bottom: 1px solid var(--border);
+    gap: 32px;
 }
 .stTabs [data-baseweb="tab"] {
-    color: #8b949e;
-    font-size: 13px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
     background: transparent;
+    border-bottom: 2px solid transparent;
+    padding-bottom: 8px;
 }
 .stTabs [aria-selected="true"] {
-    color: #58a6ff !important;
-    border-bottom: 2px solid #3b82f6 !important;
+    color: var(--text-primary) !important;
+    border-bottom: 2px solid var(--accent-vermillion) !important;
 }
 
-/* Expander */
+/* ── Expander ─────────────────────────────────────────────────────────── */
 details {
-    background-color: #161b22;
-    border: 1px solid #30363d !important;
-    border-radius: 6px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border) !important;
+    border-radius: 0;
 }
-summary { color: #8b949e; font-size: 13px; }
+summary {
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+}
 
-/* Alerts */
-div[data-testid="stInfo"]    { background-color: #0d2136; border: 1px solid #1c3a5e; color: #58a6ff; }
-div[data-testid="stWarning"] { background-color: #2d1f00; border: 1px solid #5a3d00; color: #d29922; }
-div[data-testid="stSuccess"] { background-color: #0d2b1a; border: 1px solid #1a5e35; color: #3fb950; }
-div[data-testid="stError"]   { background-color: #2d0f0f; border: 1px solid #5a1a1a; color: #f85149; }
+/* ── Alerts — flat, single-rule accent ─────────────────────────────────── */
+div[data-testid="stInfo"], div[data-testid="stWarning"],
+div[data-testid="stSuccess"], div[data-testid="stError"] {
+    background: var(--bg-surface);
+    border-radius: 0;
+    border: 1px solid var(--border);
+    border-left-width: 3px;
+    color: var(--text-primary);
+    font-family: var(--font-body);
+}
+div[data-testid="stInfo"]    { border-left-color: var(--accent-cobalt); }
+div[data-testid="stWarning"] { border-left-color: var(--accent-gold); }
+div[data-testid="stSuccess"] { border-left-color: var(--accent-sage); }
+div[data-testid="stError"]   { border-left-color: var(--accent-rust); }
 
-/* Radio button pill styling */
+/* ── Radio (filter pills) ─────────────────────────────────────────────── */
 div[data-testid="stRadio"] > div {
     flex-direction: row;
-    gap: 6px;
-    flex-wrap: wrap;
+    gap: 0;
+    border: 1px solid var(--border);
+    background: var(--bg-surface);
+    width: fit-content;
 }
 div[data-testid="stRadio"] label {
-    background: #21262d;
-    border: 1px solid #30363d;
-    border-radius: 20px;
-    padding: 4px 14px;
-    font-size: 12px;
-    color: #8b949e;
+    background: transparent;
+    border: none;
+    border-right: 1px solid var(--border);
+    border-radius: 0;
+    padding: 7px 18px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--text-muted);
     cursor: pointer;
+    transition: all 0.15s ease;
+    margin: 0;
 }
+div[data-testid="stRadio"] label:last-child { border-right: none; }
+div[data-testid="stRadio"] label:hover { color: var(--text-primary); }
 div[data-testid="stRadio"] label:has(input:checked) {
-    background: #1d4ed8;
-    border-color: #1d4ed8;
-    color: #ffffff;
+    background: var(--text-primary);
+    color: var(--bg-deep);
 }
 
-/* Spinner */
-.stSpinner > div { border-top-color: #3b82f6 !important; }
-
-/* Progress bar */
+/* ── Progress bar ─────────────────────────────────────────────────────── */
+div[data-testid="stProgress"] {
+    height: 2px;
+}
 div[data-testid="stProgress"] > div > div {
-    background-color: #1d4ed8;
+    background: var(--accent-vermillion);
+    border-radius: 0;
 }
 
-/* Scrollbar */
+/* ── Scrollbar ────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: #0d1117; }
-::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+::-webkit-scrollbar-track { background: var(--bg-deep); }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 0; }
+::-webkit-scrollbar-thumb:hover { background: var(--accent-vermillion); }
 
-/* Captions */
-.stCaption, p, label, span { color: #8b949e; }
-h1, h2, h3, h4, h5 { color: #e6edf3; }
-
-/* DataFrame container (used by Sent Tracker fallback) */
-div[data-testid="stDataFrame"] {
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 8px;
+/* ── Section / editorial markers ──────────────────────────────────────── */
+.cre-section-rule {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.22em;
+    color: var(--text-muted);
+    margin: 28px 0 14px 0;
+}
+.cre-section-rule::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--border);
 }
 
-/* Markdown links */
-a { color: #58a6ff; }
-a:hover { color: #79c0ff; }
+/* Editorial tier chip — pure monospace, sharp */
+.cre-chip {
+    display: inline-block;
+    padding: 2px 9px;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    border: 1px solid currentColor;
+    border-radius: 0;
+    margin-right: 8px;
+}
+.cre-chip.hot     { color: var(--accent-vermillion); }
+.cre-chip.warm    { color: var(--accent-gold); }
+.cre-chip.nurture { color: var(--accent-cobalt); }
+.cre-chip.new     { color: var(--accent-sage); background: rgba(134,177,105,0.08); }
+.cre-chip.sent    { color: var(--text-muted); }
+
+/* Pulse dot */
+.cre-pulse {
+    display: inline-block;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    margin-right: 8px;
+    vertical-align: middle;
+}
+.cre-pulse.live { background: var(--accent-vermillion); animation: cre-breathe 2.2s ease-in-out infinite; }
+.cre-pulse.idle { background: var(--text-muted); }
+.cre-pulse.ok   { background: var(--accent-sage); }
+@keyframes cre-breathe {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(255,91,58,0.6); }
+    50%      { opacity: 0.5; box-shadow: 0 0 0 6px rgba(255,91,58,0); }
+}
+
+/* Data display — for headline numbers like "1,600" */
+.cre-stat {
+    font-family: var(--font-display);
+    font-variation-settings: "opsz" 144, "SOFT" 50;
+    font-size: 30px;
+    font-weight: 500;
+    color: var(--text-primary);
+    letter-spacing: -0.02em;
+    line-height: 1;
+}
+.cre-stat-label {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+    display: block;
+}
+
+/* Decorative bracket markers around important values */
+.cre-bracket {
+    color: var(--accent-vermillion);
+    font-family: var(--font-mono);
+    margin: 0 4px;
+    font-weight: 300;
+    opacity: 0.6;
+}
+
+/* DataFrame container */
+div[data-testid="stDataFrame"] {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 0;
+}
+
+/* Links */
+a { color: var(--accent-vermillion); text-decoration: none; }
+a:hover { color: var(--text-primary); }
+
+/* Toasts */
+div[data-testid="stToast"] {
+    background: var(--bg-elevated) !important;
+    border: 1px solid var(--border-strong) !important;
+    border-left: 3px solid var(--accent-vermillion) !important;
+    border-radius: 0 !important;
+    color: var(--text-primary) !important;
+    font-family: var(--font-body) !important;
+}
+
+/* Markdown copy */
+.stMarkdown p { line-height: 1.55; font-size: 14px; color: var(--text-secondary); }
+
+/* Selectbox dropdown */
+div[data-baseweb="popover"] > div { background: var(--bg-elevated) !important; border: 1px solid var(--border) !important; }
+
+hr { border-color: var(--border) !important; opacity: 0.6; }
+
+/* The signature ornament — small geometric mark we can place anywhere */
+.cre-mark::before {
+    content: "◆";
+    color: var(--accent-vermillion);
+    font-size: 7px;
+    margin-right: 8px;
+    vertical-align: middle;
+    opacity: 0.8;
+}
 </style>
 """

@@ -48,6 +48,19 @@ _LABEL_KEYWORDS: Dict[str, List[str]] = {
 }
 
 
+def _keyword_match(haystack_lower: str, keywords: List[str]) -> bool:
+    """True if any keyword matches *haystack_lower* on a word boundary.
+
+    Substring matching produces false positives like "lease" inside "please"
+    or "hire" inside "higher" — `\\b` boundaries fix that.
+    """
+    for kw in keywords:
+        # Allow multi-word keywords; \b around the whole escaped phrase.
+        if re.search(r"\b" + re.escape(kw) + r"\b", haystack_lower):
+            return True
+    return False
+
+
 def _snippet_for_label(label: str, text: str, max_chars: int = 280) -> str:
     """Find a sentence from *text* that mentions a keyword for *label*."""
     if not text:
@@ -59,8 +72,7 @@ def _snippet_for_label(label: str, text: str, max_chars: int = 280) -> str:
     # Sentence split. Keep punctuation, allow . ! ? as boundaries.
     sentences = re.split(r"(?<=[.!?])\s+", text)
     for sent in sentences:
-        low = sent.lower()
-        if any(kw in low for kw in keywords):
+        if _keyword_match(sent.lower(), keywords):
             return sent.strip()[:max_chars]
     # No keyword match — fall back to the article's opening sentence so the
     # card has *something* readable rather than truncated mid-word chrome.
@@ -101,6 +113,13 @@ class ResearchReport:
     sector:         str    = ""
     source:         str    = "watchlist"   # "watchlist" | "discovered"
     approved:       bool   = True          # False for discovered leads
+    # Firmographic numbers — populated from Apollo enrich + jobs scraper
+    headcount:      int    = 0             # Apollo's estimated_num_employees
+    industry:       str    = ""            # Apollo's industry slug
+    open_roles:     int    = 0             # total live jobs across the ATS
+    office_roles:   int    = 0             # subset matching workplace/RE titles
+    ats:            str    = ""            # "Greenhouse" | "Ashby" | "Lever" | ""
+    research_doc_url: str  = ""            # Google Doc dossier URL
     # draft = {"subject", "body", "linkedin", "variant"}; None if skipped
     draft:          Optional[Dict] = None
     stale:          bool   = False         # set by load_morning_run
@@ -116,11 +135,17 @@ class ResearchReport:
         kwargs = {k: v for k, v in d.items() if k != "signals"}
         kwargs["signals"] = sigs
         # tolerate older saved files missing the new fields
-        kwargs.setdefault("sector",   "")
-        kwargs.setdefault("source",   "watchlist")
-        kwargs.setdefault("approved", True)
-        kwargs.setdefault("draft",    None)
-        kwargs.setdefault("stale",    False)
+        kwargs.setdefault("sector",      "")
+        kwargs.setdefault("source",      "watchlist")
+        kwargs.setdefault("approved",    True)
+        kwargs.setdefault("draft",       None)
+        kwargs.setdefault("stale",       False)
+        kwargs.setdefault("headcount",    0)
+        kwargs.setdefault("industry",     "")
+        kwargs.setdefault("open_roles",   0)
+        kwargs.setdefault("office_roles", 0)
+        kwargs.setdefault("ats",          "")
+        kwargs.setdefault("research_doc_url", "")
         return cls(**kwargs)
 
 
@@ -302,7 +327,7 @@ def _build_signal_from_label(label: str,
             return None
         sig_type_kws = _LABEL_KEYWORDS.get(sig_type, [])
         haystack = f"{title} {body}".lower()
-        if sig_type_kws and not any(kw in haystack for kw in sig_type_kws):
+        if sig_type_kws and not _keyword_match(haystack, sig_type_kws):
             return None
         # Pick a sentence that actually mentions a keyword for this label, so
         # signal cards don't all show the same blob from a single article.
@@ -396,6 +421,11 @@ def generate_report(prospect: Dict,
         raw_articles  = articles,
         raw_jobs      = jobs,
         generated_at  = datetime.datetime.now().isoformat(),
+        headcount     = int(prospect.get("headcount") or 0),
+        industry      = prospect.get("industry", ""),
+        open_roles    = int(prospect.get("open_roles") or 0),
+        office_roles  = int(prospect.get("office_roles") or 0),
+        ats           = prospect.get("ats", ""),
     )
 
     # Concatenate article text for aggregate classification

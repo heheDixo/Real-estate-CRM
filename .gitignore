@@ -6,9 +6,7 @@
 
 # Google OAuth client secret + cached user tokens
 credentials.json
-data/gmail_token.json
-data/sheets_token.json
-data/calendar_token.json
+data/*_token.json
 
 # ── Per-run pipeline output (regenerated daily) ──────────────────────────
 data/morning_run_*.json
@@ -65,3 +63,4 @@ Thumbs.db
 
 # ── Claude Code local state ──────────────────────────────────────────────
 .claude/
+SKILL.md

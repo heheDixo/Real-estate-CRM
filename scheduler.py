@@ -120,6 +120,17 @@ def _clean_web_text(text: str) -> str:
     text = re.sub(r"\b1[-.\s]\d{3}[-.\s]\d{3}[-.\s]\d{4}\b", " ", text)
     text = re.sub(r"\(\d{3}\)\s*\d{3}[-.\s]?\d{4}", " ", text)
     text = re.sub(r"\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b", " ", text)
+    # Strip markdown heading markers (### / #### / ##) — leave the text after.
+    # Match leading hashes at start-of-line OR after whitespace; collapse the
+    # entire `#+` run plus the trailing space.
+    text = re.sub(r"(^|\s)#{1,6}\s+", r"\1", text)
+    # Strip lingering bold/italic markdown markers (** __ * _) — not the
+    # content, just the markers.
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"__([^_]+)__",     r"\1", text)
+    text = re.sub(r"(?<!\w)\*([^*\s][^*]*[^*\s]?)\*(?!\w)", r"\1", text)
+    # Strip leftover blockquote markers
+    text = re.sub(r"(^|\s)>\s+", r"\1", text)
     # Strip navigation chrome phrases
     for patt in _NAV_CHROME_PATTERNS:
         text = re.sub(patt, " ", text, flags=re.IGNORECASE)
@@ -274,15 +285,17 @@ def _generate_draft(report, prospect: Dict,
         _log_error("scheduler.email_generate", exc)
 
     if not subject or not body:
-        # graceful fallback to template
+        # graceful fallback to template — feed the REAL firmographic numbers
+        # we now have (Apollo headcount + Greenhouse/Ashby open roles) so
+        # the fallback doesn't print "0% growth, 0 active postings" lies.
         try:
             from models.enrichment   import EnrichmentResult
             from models.score_result import ScoreResult
             stub_enrich = EnrichmentResult(
-                prospect_id=report.prospect_id,
-                headcount_current=0,
-                total_jobs_posted=len(report.raw_jobs),
-                headcount_growth_pct=0,
+                prospect_id          = report.prospect_id,
+                headcount_current    = report.headcount,
+                total_jobs_posted    = report.open_roles,
+                headcount_growth_pct = 0,   # no time-series source yet
             )
             stub_score = ScoreResult(prospect_id=report.prospect_id)
             subject, body = writer._fallback_email(syn, stub_enrich, stub_score)
@@ -329,10 +342,61 @@ def _generate_draft(report, prospect: Dict,
 # ── Pipeline ────────────────────────────────────────────────────────────────
 
 
+def _enrich_firmographics(prospect: Dict) -> Dict:
+    """
+    Populate firmographic fields the report needs (headcount, industry,
+    LinkedIn URL, open-role count) from free sources:
+
+      - Apollo `organizations/enrich` for headcount + industry + LinkedIn
+      - Greenhouse / Ashby / Lever public APIs for open-role counts
+
+    Returns a possibly-mutated prospect dict. All sources are best-effort.
+    """
+    prospect = dict(prospect)
+    domain = (prospect.get("domain") or "").strip()
+    if not domain:
+        return prospect
+
+    # ── Apollo enrich (free plan endpoint) ─────────────────────────────────
+    if config.APOLLO_AVAILABLE and not prospect.get("headcount"):
+        try:
+            from scrapers import apollo_enrich_org
+            org = apollo_enrich_org(domain)
+        except Exception as exc:
+            _log_error("scheduler.apollo_enrich", exc)
+            org = {}
+        if org:
+            if org.get("headcount") and not prospect.get("headcount"):
+                prospect["headcount"] = org["headcount"]
+            if org.get("industry") and not prospect.get("industry"):
+                prospect["industry"] = org["industry"]
+            if org.get("linkedin_url") and not prospect.get("linkedin_url"):
+                prospect["linkedin_url"] = org["linkedin_url"]
+
+    # ── Open-roles count via Greenhouse / Ashby / Lever ────────────────────
+    if not prospect.get("open_roles"):
+        try:
+            from scrapers import scrape_jobs_board
+            bundle = scrape_jobs_board(
+                prospect.get("company", ""),
+                domain,
+            )
+        except Exception as exc:
+            _log_error("scheduler.jobs_board", exc)
+            bundle = {}
+        if bundle:
+            prospect["open_roles"]   = bundle.get("count", 0)
+            prospect["office_roles"] = bundle.get("office_count", 0)
+            prospect["ats"]          = bundle.get("source", "")
+
+    return prospect
+
+
 def _process_prospect(prospect: Dict, tone_injection: str, variant: str = "Warm"):
     """Wraps signal-gathering + research-agent for one prospect, with errors caught."""
     from research_agent import generate_report
     try:
+        prospect = _enrich_firmographics(prospect)
         bundle = _gather_signals(prospect)
         enrich = _enrich_for_research(prospect)
         report = generate_report(
@@ -467,14 +531,28 @@ def run_morning_pipeline() -> Dict:
         _log_error("scheduler.gmail_auth", exc)
         service = None
 
+    # Push HOT leads only to Gmail Drafts. Warm/nurture drafts stay inside
+    # the morning_run JSON so the broker can promote them from the UI if a
+    # hot lead doesn't pan out. The "To" field is left empty whenever the
+    # stored contact_email is missing OR equals the broker's own address
+    # (the watchlist placeholder) — Gmail's compose window then shows an
+    # empty "To" so the broker pastes the real client email before sending.
+    broker_self = {
+        e.lower().strip()
+        for e in (config.BROKER_EMAIL, config.AGENT_EMAIL, config.GMAIL_SENDER)
+        if e
+    }
     if service:
         for report in actionable:
-            if not report.draft or not report.contact_email:
+            if report.tier != "hot" or not report.draft:
                 continue
+            recipient = (report.contact_email or "").strip()
+            if recipient.lower() in broker_self:
+                recipient = ""
             try:
                 info = create_draft(
                     service,
-                    report.contact_email,
+                    recipient,
                     report.draft["subject"],
                     report.draft["body"],
                     prospect_name=report.company,
@@ -487,12 +565,43 @@ def run_morning_pipeline() -> Dict:
                 report.draft["draft_url"] = info.get("url", "")
                 summary["drafts_created"] += 1
 
+    # ── 5b. Per-prospect research dossier (Google Doc) ────────────────────
+    # Create one editorial dossier per actionable lead so the broker has a
+    # shareable, durable summary they can open from the dashboard. Skipped
+    # on prospects that already have a doc URL (re-runs don't duplicate).
+    summary["docs_created"] = 0
+    try:
+        from google_docs import create_research_doc
+        for report in actionable:
+            if getattr(report, "research_doc_url", ""):
+                continue
+            try:
+                url = create_research_doc(report)
+            except Exception as exc:
+                _log_error("scheduler.create_doc", exc)
+                continue
+            if url:
+                report.research_doc_url = url
+                summary["docs_created"] += 1
+    except ImportError:
+        pass
+
     # ── 6. Broker digest ─────────────────────────────────────────────────
     if service and config.BROKER_EMAIL:
         try:
             send_morning_digest(service, config.BROKER_EMAIL, reports)
         except Exception as exc:
             _log_error("scheduler.digest", exc)
+
+    # ── 6b. Sync yesterday's Gmail sends into Sheets + Calendar ──────────
+    # Picks up anything the broker sent from Gmail directly that the
+    # streamlit auto-sync missed (e.g. weekend sends with the app closed).
+    try:
+        from gmail_sync import sync_recent_sends
+        sync_summary = sync_recent_sends(lookback_days=2)
+        summary["gmail_sync"] = sync_summary
+    except Exception as exc:
+        _log_error("scheduler.gmail_sync", exc)
 
     # ── 7. Finalise summary + persist (status must be final before save) ─
     summary["completed_at"] = datetime.datetime.now().isoformat()

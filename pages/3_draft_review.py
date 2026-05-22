@@ -370,6 +370,33 @@ with draft_col:
                     "GMAIL_APP_PASSWORD in .env."
                 )
             else:
+                # Pre-send Hunter verification — block on hard fails so the
+                # broker doesn't bounce. Sets a session flag so a second
+                # click overrides for cases where Hunter is wrong.
+                verify_result = {"valid": True, "score": 50, "status": "unknown"}
+                try:
+                    from scrapers import verify_hunter_email
+                    verify_result = verify_hunter_email(lead.contact_email)
+                except Exception:
+                    pass
+
+                hard_bad = verify_result.get("status") in (
+                    "undeliverable", "invalid_format", "invalid"
+                )
+                if hard_bad and not st.session_state.get("confirm_bad_email"):
+                    st.error(
+                        f"Hunter says this email looks "
+                        f"{verify_result.get('status','undeliverable')} "
+                        f"(score {verify_result.get('score', 0)}/100). "
+                        f"Click **Send now** again to override and send "
+                        f"anyway, or update the address above."
+                    )
+                    st.session_state["confirm_bad_email"] = True
+                    st.stop()
+
+                # Clear the override flag on a clean send
+                st.session_state.pop("confirm_bad_email", None)
+
                 try:
                     msg = MIMEText(body, "plain")
                     msg["From"]    = config.GMAIL_ADDRESS
@@ -411,6 +438,8 @@ with draft_col:
                                         "Tier":          lead.tier,
                                         "Source":        f"page_3 ({variant_choice})",
                                         "Status":        "Sent",
+                                        "Hunter Status": verify_result.get("status", ""),
+                                        "Hunter Score":  verify_result.get("score", ""),
                                     },
                                 )
                         except Exception:
@@ -445,8 +474,19 @@ with draft_col:
                                         s.title for s in lead.signals[:2]
                                     ),
                                 )
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            # Surface to error log instead of swallowing — the
+                            # broker couldn't tell why follow-ups weren't appearing.
+                            try:
+                                from scheduler import _log_error
+                                _log_error("page_3.calendar_followup", exc)
+                            except Exception:
+                                pass
+                            st.warning(
+                                f"Email sent + logged to Sheets, but the "
+                                f"Calendar follow-up couldn't be created: "
+                                f"{type(exc).__name__}. Check the error log."
+                            )
                     try:
                         from tone_learner import save_approved_email
                         save_approved_email(subject, body, lead.company)

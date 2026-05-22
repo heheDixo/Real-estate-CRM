@@ -469,41 +469,82 @@ class OutreachWriter:
         successive regenerations produce visibly different drafts even
         without a live model.
         """
-        first     = prospect.contact_first_name or prospect.contact_name.split()[0]
+        first     = (prospect.contact_first_name or
+                     (prospect.contact_name.split()[0] if prospect.contact_name
+                      else "there"))
         company   = prospect.company_name
         city      = prospect.city
-        jobs      = enrichment.total_jobs_posted
-        growth    = enrichment.headcount_growth_pct
+        jobs      = enrichment.total_jobs_posted or 0
+        growth    = enrichment.headcount_growth_pct or 0
+        headcount = getattr(enrichment, "headcount_current", 0) or 0
 
+        # Subjects — only use the percentage one when we actually have growth
         subject_options = [
             f"{company}'s growth in {city} — quick question",
             f"Thinking about {company}'s next move in {city}",
             f"{company} + {city} office footprint",
             f"Quick note on {company}'s {city} trajectory",
-            f"{company} — {growth:.0f}% growth, one observation",
         ]
+        if growth > 0:
+            subject_options.append(f"{company} — {growth:.0f}% growth, one observation")
         subject = random.choice(subject_options)
 
-        opening_options = [
-            f"Noticed {company} has been growing quickly in {city} — "
-            f"{jobs} open roles and {growth:.0f}% headcount growth in the last "
-            f"six months is a meaningful pace.",
-            f"Saw the recent activity at {company} — {jobs} open roles in "
-            f"{city} and {growth:.0f}% headcount growth in six months stands out.",
-            f"{company}'s {city} team has expanded {growth:.0f}% in six months "
-            f"with {jobs} active postings — that pace usually shows up in "
-            f"space planning conversations sooner than people expect.",
-        ]
+        # Pick an opener whose claims match the data we actually have. Never
+        # mention 0% growth or 0 open roles — that reads as a copy-paste leak.
+        opening_options: list = []
+        if jobs > 0 and growth > 0:
+            opening_options += [
+                f"Noticed {company} has been growing quickly in {city} — "
+                f"{jobs} open roles and {growth:.0f}% headcount growth in the last "
+                f"six months is a meaningful pace.",
+                f"{company}'s {city} team has expanded {growth:.0f}% in six months "
+                f"with {jobs} active postings — that pace usually shows up in "
+                f"space planning conversations sooner than people expect.",
+            ]
+        elif jobs > 0:
+            opening_options += [
+                f"Noticed {company} has {jobs} open roles right now — the kind of "
+                f"hiring pace that usually puts space on the table within a quarter or two.",
+                f"{company}'s {jobs} live roles caught my eye — that's the volume "
+                f"where workplace planning starts to surface in our conversations.",
+            ]
+        elif headcount > 0:
+            opening_options += [
+                f"{company}'s {headcount:,}-person team in {city} is right in the "
+                f"window where space decisions tend to come up before the lease cycle hints at it.",
+                f"At {company}'s scale ({headcount:,} people), the timing of the "
+                f"next workplace decision is often more about growth than the calendar.",
+            ]
+        else:
+            opening_options += [
+                f"Have been tracking {company} for a while — wanted to put a marker "
+                f"down before the next workplace conversation kicks off internally.",
+                f"Reaching out cold on {company} — your name came up as the right "
+                f"person to share a quick read with on the {city} market.",
+            ]
         opening = random.choice(opening_options)
 
-        middle_options = [
-            "Companies at that trajectory often find their current space "
-            "needs a second look before it becomes urgent.",
-            "Most teams I work with at that growth rate end up reassessing "
-            "their footprint 6–12 months before they thought they would.",
-            "At that pace, the calculus on current space tends to shift "
-            "faster than the lease renewal cycle suggests.",
-        ]
+        # Middle line — only reference "that pace / growth rate" when the
+        # opener actually established a pace. Otherwise use a neutral framing.
+        has_pace = jobs > 0 or growth > 0
+        if has_pace:
+            middle_options = [
+                "Companies at that trajectory often find their current space "
+                "needs a second look before it becomes urgent.",
+                "Most teams at that growth rate end up reassessing their "
+                "footprint 6–12 months before they thought they would.",
+                "At that pace, the calculus on current space tends to shift "
+                "faster than the lease renewal cycle suggests.",
+            ]
+        else:
+            middle_options = [
+                "Most workplace decisions get framed against the lease cycle, "
+                "but the better window is usually 6–12 months earlier.",
+                "Teams at your scale tend to revisit space planning quietly, "
+                "before any of the obvious triggers force the conversation.",
+                "Worth flagging early — even a brief read of the current "
+                "market changes how the next renewal conversation lands.",
+            ]
         middle = random.choice(middle_options)
 
         closing_options = [

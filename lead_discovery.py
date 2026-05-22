@@ -228,6 +228,11 @@ _COMMON_ENGLISH_CAPS = {
         # additional publications that surfaced
         "Business Journals", "The Business Journals", "Business Today",
         "Economic Times", "The Economic Times", "Livemint",
+        "Hacker News", "The Healthcare Technology Report",
+        "Healthcare Technology Report", "Healthcare Technology Companies",
+        "The Top", "Spring Health Implements",
+        "India Today", "Mashable", "Mashable.com", "Engadget",
+        "PCMag", "blog.google",
     }
 }
 
@@ -264,6 +269,28 @@ _COMMON_NOUN_TOKENS = {
     "updates", "edition", "digest", "wrap", "recap", "headline",
     "headlines", "industry", "sector", "market", "markets",
     "ai", "machine", "learning", "data", "science", "platform",
+    "healthcare", "healthtech", "medtech", "biotech",
+    "technology", "technologies", "fintech", "saas",
+    "service", "services", "solutions", "systems",
+    "innovation", "innovations",
+    "group", "groups", "team", "teams", "world", "global",
+    "top", "best", "first",
+    "venture", "ventures", "brand", "brands", "business",
+    "businesses", "enterprise", "enterprises",
+}
+
+# Job-title tokens. A phrase containing one of these is almost certainly a
+# role posting, not a company name ("Senior UX Designer", "Software Engineer").
+_JOB_TITLE_TOKENS = {
+    "engineer", "engineers", "developer", "developers",
+    "designer", "designers", "manager", "managers",
+    "director", "directors", "specialist", "specialists",
+    "analyst", "analysts", "associate", "associates",
+    "consultant", "consultants", "coordinator", "coordinators",
+    "intern", "interns", "trainee", "trainees",
+    "architect", "architects", "scientist", "scientists",
+    "researcher", "researchers", "writer", "writers",
+    "ux", "ui", "qa", "devops", "sre",
 }
 
 
@@ -291,10 +318,27 @@ def _looks_like_company(phrase: str) -> bool:
     # "X Launches Y". Real company names don't contain conjugated verbs.
     if any(t.casefold() in _HEADLINE_VERB_TOKENS for t in tokens):
         return False
+    # Job-title tokens in any position — "Senior UX Designer", "Software
+    # Engineer". These are role postings extracted from job-board text,
+    # never companies.
+    if any(t.casefold() in _JOB_TITLE_TOKENS for t in tokens):
+        return False
     # All-common-noun phrases — "Funding Rounds", "Tech Startup",
     # "Industry Report". Real companies rarely have names like this.
-    if len(tokens) >= 2 and all(
-        t.casefold() in _COMMON_NOUN_TOKENS for t in tokens
+    if all(t.casefold() in _COMMON_NOUN_TOKENS for t in tokens):
+        return False
+    # "The X" headline phrases — "The Top", "The Healthcare Technology
+    # Report", "The Business Journals". Real "The X" companies (The North
+    # Face, The Trade Desk, The Honest Company) all have a brandable proper
+    # noun, never a generic common noun, after "The".
+    if (
+        len(tokens) >= 2
+        and tokens[0].casefold() == "the"
+        and all(
+            t.casefold() in _COMMON_NOUN_TOKENS
+            or t.casefold() in _COMMON_ENGLISH_CAPS
+            for t in tokens[1:]
+        )
     ):
         return False
     # Reject obvious garbage — Google News article IDs, URL fragments,
@@ -580,12 +624,25 @@ def _icp_queries(icp_profile: Dict) -> List[str]:
 
 def discover_new_leads(icp_profile: Dict, max_results: int = 10) -> List[Dict]:
     """
-    Run all three discovery sources, dedupe, contact-enrich, and return
-    a list of candidate lead dicts ready for broker approval.
+    Run all discovery sources (Apollo first, then free fallbacks), dedupe,
+    contact-enrich, and return candidate lead dicts ready for broker approval.
+
+    Apollo Organization Search runs first because its results are already
+    structured (real company names, domains, headcount) — it skips the noisy
+    capitalised-phrase extraction the news sources need.
     """
+    sector_for_apollo = (icp_profile.get("sectors") or
+                         [icp_profile.get("sector", "")])[0]
+    city_for_apollo   = (icp_profile.get("geographies") or ["New York"])[0]
+
     queries  = _icp_queries(icp_profile)
     existing = _existing_watchlist_domains()
     dismissed = _dismissed_ids()
+
+    # NOTE: Apollo Organization Search and People Search require a paid plan
+    # (free plan returns 403). Discovery runs on the free sources only —
+    # Apollo is still used per-prospect for enrichment in the scheduler.
+    apollo_candidates: List[Dict] = []
 
     # ── Parallel fetch ─────────────────────────────────────────────────────
     articles: List[Dict] = []
@@ -675,7 +732,21 @@ def discover_new_leads(icp_profile: Dict, max_results: int = 10) -> List[Dict]:
         if len(candidates) >= max_results:
             break
 
-    return candidates
+    # Apollo candidates first (higher-quality, structured), then news/builtin
+    # fill the rest of the slate up to max_results. Dedupe by domain.
+    merged: List[Dict] = []
+    seen_domains: set = set()
+    for c in apollo_candidates + candidates:
+        d = (c.get("domain") or "").lower().strip()
+        if d and d in seen_domains:
+            continue
+        if d:
+            seen_domains.add(d)
+        merged.append(c)
+        if len(merged) >= max_results:
+            break
+
+    return merged
 
 
 # ── Approve / dismiss ──────────────────────────────────────────────────────

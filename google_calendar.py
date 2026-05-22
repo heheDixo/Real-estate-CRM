@@ -115,7 +115,7 @@ def create_followup_event(service, calendar_id: str,
     if service is None or not calendar_id:
         return ""
 
-    followup_dt   = sent_date + datetime.timedelta(days=5)
+    followup_dt   = sent_date + datetime.timedelta(days=3)
     first_name    = (prospect.get("contact_first_name") or
                      prospect.get("contact_name", "").split(" ")[0])
     last_name     = (prospect.get("contact_last_name") or

@@ -143,9 +143,10 @@ All keys live in your local `.env` file and are never shared or hardcoded. Anyth
 | Key | Required? | Purpose |
 |---|---|---|
 | `HF_TOKEN` | yes | bart-mnli scoring + Mistral drafting via HuggingFace Inference (router endpoint) |
+| `APOLLO_API_KEY` | recommended | Apollo.io free tier — Organization Search + People Search (unlimited free for name/title/LinkedIn; ~120 email-reveal credits/month) |
 | `NEWSAPI_KEY` | recommended | NewsAPI free tier (~100 req/day, last 30 days) |
 | `FIRECRAWL_API_KEY` | recommended | Company website scraping |
-| `HUNTER_API_KEY` | optional | Email enrichment for discovered leads |
+| `HUNTER_API_KEY` | optional | Email enrichment fallback when Apollo doesn't return a verified address |
 | `GOOGLE_CREDENTIALS_PATH` | yes for Gmail/Sheets/Calendar | path to `credentials.json` (default: project root) |
 | `SHEETS_SPREADSHEET_ID` | optional | target sheet for the sent-tracker |
 | `CALENDAR_ID` | optional | target calendar for follow-up events (default: primary) |

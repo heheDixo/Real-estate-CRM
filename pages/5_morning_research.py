@@ -7,9 +7,26 @@ Left column = lead list. Right column = signal detail + Start outreach.
 import datetime
 import json
 import os
+import re
 import threading
+import time
 
 import streamlit as st
+
+
+def _scrub(text: str) -> str:
+    """Render-time defence — strip leftover markdown markers from saved
+    descriptions so older morning_run JSONs render cleanly without a re-run.
+    Also collapses runs of whitespace."""
+    if not text:
+        return ""
+    t = re.sub(r"(^|\s)#{1,6}\s+", r"\1", str(text))   # headings
+    t = re.sub(r"\*\*([^*]+)\*\*", r"\1", t)            # bold
+    t = re.sub(r"__([^_]+)__",     r"\1", t)            # bold (underscore)
+    t = re.sub(r"`([^`]+)`",       r"\1", t)            # inline code
+    t = re.sub(r"\s*\\\\\s*",     " ",   t)             # escaped backslashes
+    t = re.sub(r"(^|\s)>\s+",     r"\1", t)             # blockquote
+    return re.sub(r"\s+", " ", t).strip()
 
 import config
 from research_agent import (
@@ -55,6 +72,30 @@ def _read_progress() -> dict:
         return {"pct": 0, "message": "", "ts": None}
 
 
+def _pipeline_is_running() -> bool:
+    """True if the progress file says we're between 0 and 100, recently.
+
+    Driven off the file rather than session_state because the worker thread
+    can't safely write to session_state from outside Streamlit's context.
+    Any progress entry whose timestamp is older than 5 minutes is treated as
+    stale (the thread died without writing 100).
+    """
+    prog = _read_progress()
+    pct  = prog.get("pct", -1)
+    ts   = prog.get("ts")
+    # pct < 0 means no file yet. pct >= 100 means done. Anything in
+    # [0, 100) with a recent ts is in-flight.
+    if pct < 0 or pct >= 100:
+        return False
+    if not ts:
+        return False
+    try:
+        last = datetime.datetime.fromisoformat(ts)
+    except (TypeError, ValueError):
+        return False
+    return (datetime.datetime.now() - last).total_seconds() < 300
+
+
 def _persist_reports(reports):
     try:
         save_morning_run(reports)
@@ -63,10 +104,14 @@ def _persist_reports(reports):
 
 
 def _run_pipeline_background():
-    if st.session_state.get("research_running"):
+    """Spawn the pipeline in a daemon thread.
+
+    The thread does NOT touch st.session_state — Streamlit ignores those
+    writes from non-Streamlit threads and the UI ends up stuck. Progress and
+    completion are observed via data/pipeline_progress.json instead.
+    """
+    if _pipeline_is_running():
         return
-    st.session_state["research_running"] = True
-    st.session_state["research_error"]   = ""
 
     def _runner():
         try:
@@ -89,9 +134,6 @@ def _run_pipeline_background():
                     json.dump(log[-200:], f, indent=2)
             except Exception:
                 pass
-            st.session_state["research_error"] = str(exc)
-        finally:
-            st.session_state["research_running"] = False
 
     threading.Thread(target=_runner, daemon=True).start()
 
@@ -101,73 +143,75 @@ is_stale = bool(reports and reports[0].stale)
 today_label = datetime.date.today().strftime("%a, %b %d")
 
 
-# ── Top bar ─────────────────────────────────────────────────────────────────
+# ── Editorial subhead ───────────────────────────────────────────────────────
 
+_running = _pipeline_is_running()
 
-title_col, status_col, btn_col = st.columns([3, 2, 1])
+# Build the dek (editorial deck) string
+if _running:
+    _status_html = (
+        f'{pulse_dot("var(--accent-vermillion)")}'
+        f'<span style="color:var(--accent-vermillion);">In motion</span>'
+    )
+elif reports:
+    _status_html = (
+        f'{pulse_dot("var(--accent-sage)")}'
+        f'<span style="color:var(--text-secondary);">Filed</span>'
+    )
+else:
+    _status_html = (
+        f'{pulse_dot("var(--text-muted)")}'
+        f'<span style="color:var(--text-muted);">Awaiting first run</span>'
+    )
 
-with title_col:
+dek_col, btn_col = st.columns([4, 1])
+with dek_col:
     st.markdown(
-        '<div style="font-size:18px;font-weight:600;color:#e6edf3;">'
-        'Morning research</div>',
+        f'<div style="display:flex;align-items:baseline;gap:24px;'
+        f'margin:-4px 0 18px;">'
+        f'<div style="font-family:var(--font-display);font-size:32px;'
+        f'font-style:italic;line-height:1.1;color:var(--text-primary);'
+        f'font-variation-settings:\'opsz\' 144,\'SOFT\' 100;letter-spacing:-0.025em;">'
+        f'The morning brief'
+        f'</div>'
+        f'<div style="font-family:var(--font-mono);font-size:10.5px;'
+        f'color:var(--text-muted);text-transform:uppercase;'
+        f'letter-spacing:0.18em;padding-bottom:6px;">'
+        f'{today_label} <span class="cre-bracket">/</span> '
+        f'{len(reports)} prospects enriched <span class="cre-bracket">/</span> '
+        f'{_status_html}'
+        f'</div>'
+        f'</div>',
         unsafe_allow_html=True,
     )
-    st.markdown(
-        f'<div style="font-size:12px;color:#8b949e;margin-top:2px;">'
-        f'Today · {today_label} · {len(reports)} prospects enriched</div>',
-        unsafe_allow_html=True,
-    )
-
-with status_col:
-    if st.session_state.get("research_error"):
-        st.markdown(
-            f'<div style="font-size:12px;color:#f85149;padding-top:6px;">'
-            f'{pulse_dot("#f85149")}Last run failed — see error log</div>',
-            unsafe_allow_html=True,
-        )
-    elif st.session_state.get("research_running"):
-        st.markdown(
-            f'<div style="font-size:12px;color:#d29922;padding-top:6px;">'
-            f'{pulse_dot("#d29922")}Research running…</div>',
-            unsafe_allow_html=True,
-        )
-    elif reports:
-        st.markdown(
-            f'<div style="font-size:12px;color:#3fb950;padding-top:6px;">'
-            f'{pulse_dot()}Research complete</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            f'<div style="font-size:12px;color:#8b949e;padding-top:6px;">'
-            f'{pulse_dot("#484f58")}No research yet</div>',
-            unsafe_allow_html=True,
-        )
 
 with btn_col:
-    st.markdown('<div class="primary-btn">', unsafe_allow_html=True)
+    st.markdown('<div class="primary-btn" style="margin-top:14px;">',
+                 unsafe_allow_html=True)
     if st.button(
-        "▶ Run now",
+        "Run pipeline",
         use_container_width=True,
-        disabled=st.session_state.get("research_running", False),
+        disabled=_running,
         key="run_now_btn",
     ):
         _run_pipeline_background()
         st.toast("Research running…")
+        time.sleep(0.5)
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
 
-# ── Progress bar while running ──────────────────────────────────────────────
+# ── Progress bar + auto-poll while running ──────────────────────────────────
 
 
-if st.session_state.get("research_running"):
+if _running:
     prog = _read_progress()
-    pct = max(0, min(100, int(prog.get("pct", 0))))
+    pct  = max(0, min(100, int(prog.get("pct", 0))))
     st.progress(pct / 100, text=prog.get("message", "Running…"))
-    if pct >= 100:
-        st.session_state["research_running"] = False
-        st.rerun()
+    # Poll: re-render every 2s so the bar advances. Streamlit's run-script
+    # model means without this the UI freezes at the first snapshot.
+    time.sleep(2)
+    st.rerun()
 
 
 # ── Stale banner ────────────────────────────────────────────────────────────
@@ -212,23 +256,43 @@ if not reports:
 
 
 # ── Sent lookup for the badge ──────────────────────────────────────────────
+# Match on (company, contact_email) so multiple watchlist entries sharing the
+# same placeholder email (e.g. the broker's own address) don't all show as
+# sent the moment one of them is. Company alone covers the case where the
+# email was edited after send.
 
-
-sent_today: set = set()
+sent_today_pairs: set = set()    # {(company_lower, email_lower)}
+sent_today_companies: set = set()  # {company_lower}
 try:
     if config.SHEETS_SPREADSHEET_ID and os.path.exists(config.GOOGLE_CREDENTIALS_PATH):
         from google_sheets import authenticate_sheets, get_all_sent_emails
         svc = authenticate_sheets()
+        today_iso = datetime.date.today().isoformat()
         if svc:
             for row in get_all_sent_emails(svc, config.SHEETS_SPREADSHEET_ID):
-                if row.get("Date Sent") == datetime.date.today().isoformat():
-                    sent_today.add((row.get("Contact Email") or "").lower())
+                date_field = (row.get("Date Sent") or "")[:10]
+                if date_field != today_iso:
+                    continue
+                company = (row.get("Company") or "").lower().strip()
+                email_  = (row.get("Contact Email") or "").lower().strip()
+                if company:
+                    sent_today_companies.add(company)
+                if company and email_:
+                    sent_today_pairs.add((company, email_))
 except Exception:
     pass
 
 
 def _is_sent(rep: ResearchReport) -> bool:
-    return rep.contact_email.lower() in sent_today
+    co = (rep.company or "").lower().strip()
+    em = (rep.contact_email or "").lower().strip()
+    if not co:
+        return False
+    if (co, em) in sent_today_pairs:
+        return True
+    # Fall back to company match — covers cases where the broker edited the
+    # email after send (sheet has the new addr, lead still carries the old).
+    return co in sent_today_companies and bool(em) is False
 
 
 # ── Filter pills ────────────────────────────────────────────────────────────
@@ -241,12 +305,19 @@ filter_choice = st.radio(
     key="research_filter",
 )
 
+# A "dead" lead is one that the pipeline ran but found nothing on today —
+# composite=0, zero signals. They're corpses, not leads, so they don't
+# belong in the default dashboard. Users can still find them via the raw
+# watchlist file if they need to.
+def _is_dead(r) -> bool:
+    return r.composite_score == 0 and not r.signals
+
 filter_fn = {
-    "All":       lambda r: True,
+    "All":       lambda r: not _is_dead(r),
     "Hot":       lambda r: r.tier == "hot"  and not r.skip_today,
     "Warm":      lambda r: r.tier == "warm" and not r.skip_today,
-    "Nurture":   lambda r: r.tier == "nurture",
-    "New leads": lambda r: r.source == "discovered",
+    "Nurture":   lambda r: r.tier == "nurture" and not _is_dead(r),
+    "New leads": lambda r: r.source == "discovered" and not _is_dead(r),
 }[filter_choice]
 
 filtered = sorted(
@@ -263,48 +334,77 @@ left, right = st.columns([0.4, 0.6], gap="medium")
 
 # Left — lead list
 with left:
-    st.markdown(
-        '<div style="font-size:11px;color:#8b949e;text-transform:uppercase;'
-        'letter-spacing:0.5px;margin-bottom:8px;">'
-        f'Lead list  ·  {len(filtered)} '
-        f'result{"s" if len(filtered) != 1 else ""}</div>',
-        unsafe_allow_html=True,
+    section_header(
+        "Dispatch",
+        f'{len(filtered)} entr{"ies" if len(filtered) != 1 else "y"}',
     )
 
     if not filtered:
-        empty_state("📭", "No leads match this filter.")
+        empty_state("📭", "No leads match this filter.",
+                    "Try widening the criteria or run the pipeline.")
 
     selected_id = st.session_state.get("selected_report_id")
 
     for idx, rep in enumerate(filtered):
         is_selected = (rep.prospect_id == selected_id)
-        tier_color  = config.TIER_COLORS.get(rep.tier, config.TIER_COLORS["nurture"])["bar"]
-        accent      = tier_color if is_selected else "#30363d"
-        card_bg     = "#1f2937" if is_selected else "#161b22"
+        tier_key    = (rep.tier or "nurture").lower()
+        accent_var  = {
+            "hot":     "var(--accent-vermillion)",
+            "warm":    "var(--accent-gold)",
+            "nurture": "var(--accent-cobalt)",
+        }.get(tier_key, "var(--accent-cobalt)")
 
         badges = tier_badge(rep.tier)
         if rep.source == "discovered" and not rep.approved:
-            badges += " " + new_badge()
+            badges += new_badge()
         if rep.draft:
-            badges += " " + draft_ready_badge()
+            badges += draft_ready_badge()
         if _is_sent(rep):
-            badges += " " + sent_badge()
+            badges += sent_badge()
+
+        # Selected card has a stronger left rule + brighter surface
+        selected_bg = "var(--bg-elevated)" if is_selected else "var(--bg-surface)"
+
+        # Compose the byline cleanly — skip the separator when one side is
+        # empty, omit the byline entirely when both are. Avoids the ugly
+        # "— · —" / "— · WORKPLACE EXPERIENCE LEAD" rendering.
+        bits = [b for b in (rep.contact_name, rep.contact_title) if b]
+        if bits:
+            byline_inner = '<span class="cre-bracket">·</span>'.join(bits)
+            byline_html = (
+                f'<div style="font-family:var(--font-mono);font-size:10px;'
+                f'color:var(--text-muted);margin-top:6px;letter-spacing:0.04em;'
+                f'text-transform:uppercase;">{byline_inner}</div>'
+            )
+        else:
+            byline_html = (
+                f'<div style="font-family:var(--font-mono);font-size:10px;'
+                f'color:var(--text-muted);margin-top:6px;letter-spacing:0.16em;'
+                f'text-transform:uppercase;font-style:italic;opacity:0.7;">'
+                f'Contact pending</div>'
+            )
 
         st.markdown(
-            f'<div style="background:{card_bg};border:1px solid #30363d;'
-            f'border-left:3px solid {accent};border-radius:6px;'
-            f'padding:10px 14px;margin-bottom:8px;">'
-            f'<div style="display:flex;justify-content:space-between;align-items:start;">'
-            f'<div style="font-size:13px;font-weight:600;color:#e6edf3;">'
+            f'<div class="cre-card {tier_key}" style="background:{selected_bg};'
+            f'margin-bottom:10px;padding:14px 16px 14px 18px;">'
+            # Headline row — serif company + serif score
+            f'<div style="display:flex;justify-content:space-between;'
+            f'align-items:baseline;gap:12px;">'
+            f'<div style="font-family:var(--font-display);font-size:16px;'
+            f'font-weight:500;color:var(--text-primary);letter-spacing:-0.01em;'
+            f'font-variation-settings:\'opsz\' 144,\'SOFT\' 50;">'
             f'{rep.company}</div>'
-            f'<div style="font-size:18px;font-weight:600;color:{tier_color};">'
+            f'<div style="font-family:var(--font-display);font-size:24px;'
+            f'font-weight:500;color:{accent_var};font-variant-numeric:tabular-nums;'
+            f'font-variation-settings:\'opsz\' 144;line-height:1;">'
             f'{rep.composite_score}</div>'
             f'</div>'
-            f'<div style="font-size:11px;color:#8b949e;margin-top:2px;">'
-            f'{rep.contact_name or "—"} · {rep.contact_title or "—"}</div>'
-            f'<div style="margin:6px 0;display:flex;gap:5px;flex-wrap:wrap;">'
-            f'{badges}</div>'
-            f'<div style="margin-top:6px;">{score_bar(rep.composite_score, rep.tier)}</div>'
+            f'{byline_html}'
+            # Tag strip
+            f'<div style="margin:10px 0 8px;display:flex;gap:4px;flex-wrap:wrap;'
+            f'align-items:center;">{badges}</div>'
+            # Score rule
+            f'{score_bar(rep.composite_score, rep.tier)}'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -327,31 +427,71 @@ with right:
         st.session_state["selected_report_id"] = sel.prospect_id
 
     if sel is None:
-        st.markdown(
-            '<div style="height:220px;display:flex;align-items:center;'
-            'justify-content:center;color:#484f58;font-size:13px;">'
-            'Select a lead from the list to view research</div>',
-            unsafe_allow_html=True,
+        empty_state(
+            "·",
+            "Select a lead from the dispatch on the left",
+            "Detail view appears here",
         )
         st.stop()
 
+    tier_key   = (sel.tier or "nurture").lower()
+    tier_var   = {
+        "hot":     "var(--accent-vermillion)",
+        "warm":    "var(--accent-gold)",
+        "nurture": "var(--accent-cobalt)",
+    }.get(tier_key, "var(--accent-cobalt)")
     tier_color = config.TIER_COLORS.get(sel.tier, config.TIER_COLORS["nurture"])["bar"]
 
-    # Header block
+    # Editorial dossier header — large serif company, italic kicker, contact links.
+    # Compose the byline only from non-empty fields so we never print "— · —".
+    bits = [b for b in (sel.contact_name, sel.contact_title) if b]
+    if sel.industry:
+        bits.append(sel.industry.title())
+    if bits:
+        contact_line = '<span class="cre-bracket">·</span>'.join(bits)
+    else:
+        contact_line = (
+            '<span style="font-style:italic;opacity:0.7;">Contact pending</span>'
+        )
+    industry_line = ""
+
+    contact_links = ""
+    link_bits = []
+    if sel.contact_email:
+        link_bits.append(f'<a href="mailto:{sel.contact_email}">{sel.contact_email}</a>')
+    if sel.linkedin_url:
+        link_bits.append(f'<a href="{sel.linkedin_url}" target="_blank">LinkedIn ↗</a>')
+    if getattr(sel, "research_doc_url", ""):
+        link_bits.append(
+            f'<a href="{sel.research_doc_url}" target="_blank" '
+            f'style="color:var(--accent-gold);">Research doc ↗</a>'
+        )
+    if link_bits:
+        contact_links = (
+            f'<div style="font-family:var(--font-mono);font-size:10px;'
+            f'margin-top:10px;letter-spacing:0.04em;">'
+            + '<span class="cre-bracket">·</span>'.join(link_bits)
+            + '</div>'
+        )
+
     st.markdown(
-        f'<div style="background:#1c2128;border:1px solid #30363d;'
-        f'border-radius:8px;padding:14px 16px;margin-bottom:12px;">'
-        f'<div style="font-size:17px;font-weight:600;color:#e6edf3;">'
+        f'<div class="cre-card {tier_key}" style="padding:20px 24px 22px;'
+        f'margin-bottom:18px;animation-delay:0s;">'
+        # Kicker
+        f'<div style="font-family:var(--font-mono);font-size:9.5px;'
+        f'text-transform:uppercase;letter-spacing:0.22em;color:{tier_var};'
+        f'margin-bottom:8px;">— {sel.tier.title()} tier dossier</div>'
+        # Headline company
+        f'<div style="font-family:var(--font-display);font-size:34px;'
+        f'font-weight:500;color:var(--text-primary);line-height:1;'
+        f'letter-spacing:-0.025em;font-variation-settings:\'opsz\' 144,\'SOFT\' 50;">'
         f'{sel.company}</div>'
-        f'<div style="font-size:12px;color:#8b949e;margin-top:4px;">'
-        f'{sel.contact_name or "—"} · {sel.contact_title or "—"}</div>'
-        + (f'<div style="font-size:11px;margin-top:6px;">'
-           f'<a href="mailto:{sel.contact_email}" style="color:#58a6ff;">'
-           f'{sel.contact_email}</a>'
-           + (f'  ·  <a href="{sel.linkedin_url}" target="_blank" '
-              f'style="color:#58a6ff;">LinkedIn ↗</a>' if sel.linkedin_url else "")
-           + '</div>' if sel.contact_email else "")
-        + f'</div>',
+        # Byline
+        f'<div style="font-family:var(--font-mono);font-size:10.5px;'
+        f'color:var(--text-muted);margin-top:10px;letter-spacing:0.08em;'
+        f'text-transform:uppercase;">{contact_line}{industry_line}</div>'
+        f'{contact_links}'
+        f'</div>',
         unsafe_allow_html=True,
     )
 
@@ -366,16 +506,77 @@ with right:
     with s3:
         metric_card("Tier", sel.tier.title(), value_color=tier_color)
 
+    # Firmographic row — headcount (Apollo), open roles (Greenhouse/Ashby/Lever)
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        metric_card(
+            "Headcount",
+            f"{sel.headcount:,}" if sel.headcount else "—",
+            value_color="#e6edf3",
+        )
+    with f2:
+        roles_label = (
+            f"{sel.open_roles}"
+            + (f" ({sel.ats})" if sel.ats else "")
+        ) if sel.open_roles else "—"
+        metric_card(
+            "Open roles",
+            roles_label,
+            value_color="#3fb950" if sel.open_roles else "#e6edf3",
+        )
+    with f3:
+        metric_card(
+            "Office / RE roles",
+            str(sel.office_roles) if sel.office_roles else "—",
+            value_color="#d29922" if sel.office_roles else "#e6edf3",
+        )
+
+    # ── Research doc generator (on-demand) ────────────────────────────────
+    if not getattr(sel, "research_doc_url", ""):
+        st.markdown(
+            '<div style="margin-top:14px;padding-top:14px;'
+            'border-top:1px solid var(--border-faint);"></div>',
+            unsafe_allow_html=True,
+        )
+        if st.button(
+            "Generate research doc",
+            key=f"gen_doc_{sel.prospect_id}",
+            use_container_width=True,
+        ):
+            with st.spinner("Composing dossier in Google Docs…"):
+                try:
+                    from google_docs import create_research_doc
+                    url = create_research_doc(sel)
+                except Exception as exc:
+                    st.error(f"Doc creation failed: {type(exc).__name__}: {exc}")
+                    url = ""
+                if url:
+                    sel.research_doc_url = url
+                    _persist_reports(reports)
+                    st.success("Research doc created — refreshing…")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.warning(
+                        "Couldn't create the doc — check that the Docs API is "
+                        "enabled in your Google Cloud project, then try again. "
+                        "Details in `data/error_log.json` under scope `docs.*`."
+                    )
+
     # Approve / dismiss for discovered leads
     if sel.source == "discovered" and not sel.approved:
+        via = getattr(sel, "discovered_via", "Google News")
         st.markdown(
-            '<div style="margin-top:14px;background:#2d1f5e;border:1px solid '
-            '#3d2b6e;border-radius:6px;padding:10px 14px;font-size:12px;'
-            'color:#a371f7;">'
-            f'NEW lead — discovered via '
-            f'{getattr(sel, "discovered_via", "Google News RSS")}. '
-            'Approve to add to your watchlist, or dismiss.'
-            '</div>',
+            f'<div style="margin:14px 0;padding:12px 14px;'
+            f'background:var(--bg-surface);border:1px solid var(--border);'
+            f'border-left:3px solid var(--accent-sage);">'
+            f'<span class="cre-chip new" style="margin-right:10px;">Filed today</span>'
+            f'<span style="font-family:var(--font-body);font-size:13px;'
+            f'color:var(--text-secondary);">'
+            f'Sourced from <em style="color:var(--text-primary);'
+            f'font-style:italic;">{via}</em>. '
+            f'Approve to add to the watchlist.</span>'
+            f'</div>',
             unsafe_allow_html=True,
         )
         c_yes, c_no = st.columns(2)
@@ -429,21 +630,32 @@ with right:
         )
 
     for s in sel.signals:
+        title_clean = _scrub(s.title)
+        desc_clean  = _scrub(s.description)
         st.markdown(
-            f'<div style="border-bottom:1px solid #21262d;padding:12px 0;">'
-            f'<div style="display:flex;gap:10px;">'
-            f'<div style="font-size:20px;flex-shrink:0;">{signal_icon(s.type)}</div>'
-            f'<div style="flex:1;">'
-            f'{signal_type_label(s.type)}'
-            f'<div style="font-size:12px;font-weight:500;color:#e6edf3;margin:5px 0 3px;">'
-            f'{s.title}</div>'
-            f'<div style="font-size:11px;color:#8b949e;line-height:1.6;">'
-            f'{s.description}</div>'
+            f'<div style="padding:14px 0;border-bottom:1px solid var(--border-faint);">'
+            # Type chip + score on the same line as the kicker
             f'<div style="display:flex;justify-content:space-between;'
-            f'align-items:center;margin-top:6px;">'
-            f'<span style="font-size:10px;color:#484f58;">{s.source} · {s.score:.0f}</span>'
-            f'<span>{strength_dots(s.strength)}</span>'
-            f'</div></div></div></div>',
+            f'align-items:center;margin-bottom:8px;">'
+            f'<span>{signal_icon(s.type)}{signal_type_label(s.type)}</span>'
+            f'<span style="font-family:var(--font-mono);font-size:9.5px;'
+            f'color:var(--text-muted);letter-spacing:0.18em;text-transform:uppercase;">'
+            f'{s.source} <span class="cre-bracket">·</span> '
+            f'<span style="color:var(--text-data);font-variant-numeric:tabular-nums;">'
+            f'{s.score:.0f}</span></span>'
+            f'</div>'
+            # Headline — serif, italic
+            f'<div style="font-family:var(--font-display);font-size:15px;'
+            f'color:var(--text-primary);line-height:1.3;letter-spacing:-0.01em;'
+            f'font-variation-settings:\'opsz\' 144;margin-bottom:4px;">'
+            f'{title_clean}</div>'
+            # Body — body font, secondary
+            f'<div style="font-family:var(--font-body);font-size:12.5px;'
+            f'color:var(--text-secondary);line-height:1.55;">'
+            f'{desc_clean}</div>'
+            # Strength rule
+            f'<div style="margin-top:8px;">{strength_dots(s.strength)}</div>'
+            f'</div>',
             unsafe_allow_html=True,
         )
 
@@ -455,13 +667,23 @@ with right:
     )
 
     already_sent = _is_sent(sel)
-    btn_label = "Sent ✓" if already_sent else "✉  Start outreach →"
+    if already_sent:
+        st.markdown(
+            f'<div style="margin-bottom:10px;font-family:var(--font-mono);'
+            f'font-size:10px;color:var(--accent-sage);letter-spacing:0.18em;'
+            f'text-transform:uppercase;">'
+            f'<span class="cre-pulse ok"></span>Sent today · open again to re-engage'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    btn_label = (
+        "Open thread →" if already_sent else "✉  Start outreach →"
+    )
     st.markdown('<div class="primary-btn">', unsafe_allow_html=True)
     if st.button(
         btn_label,
         type="primary",
         use_container_width=True,
-        disabled=already_sent,
         key=f"outreach_{sel.prospect_id}",
     ):
         if not sel.draft:
