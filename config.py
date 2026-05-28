@@ -62,8 +62,17 @@ GOOGLE_OAUTH_AVAILABLE = bool(GOOGLE_CREDENTIALS_PATH) and os.path.exists(GOOGLE
 # match what's currently in DNS.
 HF_API_BASE     = "https://router.huggingface.co/hf-inference/models"
 SCORING_MODEL   = "facebook/bart-large-mnli"
-WRITING_MODEL   = "mistralai/Mistral-7B-Instruct-v0.2"
-BRIEFING_MODEL  = "mistralai/Mistral-7B-Instruct-v0.2"
+# Mistral-7B-Instruct-v0.2 was pulled from the hf-inference free provider in
+# mid-2025. Llama-3.1-8B-Instruct routes through the OpenAI-compatible
+# /v1/chat/completions endpoint below, drawing from the $0.10/mo free credits
+# before pay-as-you-go kicks in.
+WRITING_MODEL   = "meta-llama/Llama-3.1-8B-Instruct"
+BRIEFING_MODEL  = "meta-llama/Llama-3.1-8B-Instruct"
+
+# Chat-completions URL used by hf_client.generate_text. The legacy
+# /hf-inference/models/{model} endpoint is CPU/legacy-only now; chat models
+# go through this OpenAI-style router instead.
+HF_CHAT_URL     = "https://router.huggingface.co/v1/chat/completions"
 
 # Inference API timeouts (seconds)
 SCORING_TIMEOUT  = 30

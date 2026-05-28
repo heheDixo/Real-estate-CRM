@@ -24,7 +24,12 @@ TIMEOUT      = 30
 BACKOFF_BASE = 2  # seconds — waits 2s, 4s, 8s between retries
 
 SCORER_MODEL = "facebook/bart-large-mnli"
-WRITER_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
+WRITER_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
+
+# Markers from the old Mistral [INST]...[/INST] template. Stripped before the
+# prompt is sent as a chat user-message — Llama applies its own chat template,
+# and the bare instruction text reads as a normal user request.
+_LEGACY_PROMPT_MARKERS = ("[INST]", "[/INST]", "<s>", "</s>")
 
 
 # ─────────────────────────────────────────
@@ -110,29 +115,42 @@ def generate_text(
     fallback_text: str = "",
 ) -> str:
     """
-    Calls Mistral-7B text generation with retry + fallback.
-    Returns generated text string, or fallback_text if all retries fail.
-    """
-    last_error = None
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    payload = {
-        "inputs": prompt,
-        "parameters": {
-            "max_new_tokens": max_new_tokens,
-            "temperature": temperature,
-            "return_full_text": False
-        }
-    }
-    url = f"{config.HF_API_BASE}/{model}"
+    Generate text via the HF router's OpenAI-compatible chat-completions
+    endpoint. The legacy /hf-inference/models/{model} endpoint no longer
+    serves community LLMs; the router auto-picks a paid provider (drawing
+    from the $0.10/mo free credits) for chat-class models.
 
+    Returns generated text, or fallback_text if all retries fail.
+    """
+    # Strip the old Mistral [INST]/[/INST] markers so existing prompt
+    # builders in writer.py and scheduler.py don't need to be touched.
+    clean = prompt
+    for marker in _LEGACY_PROMPT_MARKERS:
+        clean = clean.replace(marker, "")
+    clean = clean.strip()
+
+    headers = {
+        "Authorization": f"Bearer {HF_TOKEN}",
+        "Content-Type":  "application/json",
+    }
+    payload = {
+        "model":       model,
+        "messages":    [{"role": "user", "content": clean}],
+        "max_tokens":  max_new_tokens,
+        "temperature": temperature,
+    }
+
+    last_error = None
     for attempt in range(MAX_RETRIES):
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=TIMEOUT)
+            resp = requests.post(
+                config.HF_CHAT_URL, headers=headers, json=payload, timeout=TIMEOUT
+            )
             resp.raise_for_status()
             data = resp.json()
-            
-            if isinstance(data, list) and data:
-                text = data[0].get("generated_text", "").strip()
+            choices = data.get("choices") or []
+            if choices:
+                text = (choices[0].get("message", {}).get("content") or "").strip()
                 if text:
                     return text
 
