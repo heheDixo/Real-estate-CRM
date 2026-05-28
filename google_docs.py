@@ -63,51 +63,30 @@ def _log(scope: str, exc) -> None:
 # ── Auth ────────────────────────────────────────────────────────────────────
 
 
-def authenticate_docs():
-    """Return (docs_service, drive_service) tuple, or (None, None) on failure."""
+def authenticate_docs(credentials=None):
+    """Return (docs_service, drive_service) tuple, or (None, None) on failure.
+
+    If `credentials` is passed (from a logged-in Streamlit user), use them
+    directly. Otherwise (scheduler / background job), load the first user's
+    token from Supabase via google_auth_loader.
+    """
     try:
-        from google.oauth2.credentials import Credentials
-        from google_auth_oauthlib.flow import InstalledAppFlow
-        from google.auth.transport.requests import Request
         from googleapiclient.discovery import build
     except ImportError as exc:
         _log("docs.auth.import", exc)
         return None, None
 
-    creds = None
-    os.makedirs("data", exist_ok=True)
-    if os.path.exists(TOKEN_PATH):
-        try:
-            creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
-        except Exception:
-            creds = None
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception as exc:
-                _log("docs.auth.refresh", exc)
-                creds = None
-        if not creds:
-            if not os.path.exists(config.GOOGLE_CREDENTIALS_PATH):
-                return None, None
-            try:
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    config.GOOGLE_CREDENTIALS_PATH, SCOPES,
-                )
-                creds = flow.run_local_server(port=0)
-            except Exception as exc:
-                _log("docs.auth.flow", exc)
-                return None, None
-        try:
-            with open(TOKEN_PATH, "w") as f:
-                f.write(creds.to_json())
-        except Exception:
-            pass
+    if credentials is None:
+        from google_auth_loader import load_user_credentials_from_db
+        credentials = load_user_credentials_from_db(SCOPES)
+        if credentials is None:
+            _log("docs.auth.no_credentials",
+                 RuntimeError("No Google token in Supabase — sign in first"))
+            return None, None
 
     try:
-        docs  = build("docs",  "v1", credentials=creds, cache_discovery=False)
-        drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+        docs  = build("docs",  "v1", credentials=credentials, cache_discovery=False)
+        drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
         return docs, drive
     except Exception as exc:
         _log("docs.auth.build", exc)

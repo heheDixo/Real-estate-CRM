@@ -247,6 +247,24 @@ def render_sidebar() -> None:
             unsafe_allow_html=True,
         )
 
+        # Greeting — derived from the logged-in user
+        _user = st.session_state.get("current_user") or {}
+        _full_name = _user.get("full_name") or ""
+        _first_name = _full_name.split()[0] if _full_name else (
+            _user.get("google_email", "").split("@")[0] or "there"
+        )
+        st.markdown(
+            f'<div style="padding:0 0 14px;font-family:var(--font-mono);'
+            f'font-size:10px;color:var(--text-muted);text-transform:uppercase;'
+            f'letter-spacing:0.16em;">'
+            f'Signed in <span style="color:var(--text-secondary);'
+            f'text-transform:none;letter-spacing:0;">as '
+            f'<em style="color:var(--text-primary);font-style:italic;">'
+            f'{_first_name}</em></span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
         # Nav header
         st.markdown(
             '<div style="font-family:var(--font-mono);font-size:9px;'
@@ -307,9 +325,19 @@ def render_sidebar() -> None:
             unsafe_allow_html=True,
         )
 
-        # Footer colophon
+        # Sign-out
         st.markdown(
             '<div style="margin-top:24px;padding-top:14px;'
+            'border-top:1px solid var(--border);"></div>',
+            unsafe_allow_html=True,
+        )
+        if st.button("Sign out", use_container_width=True, key="_signout_btn"):
+            from session_manager import logout
+            logout()
+
+        # Footer colophon
+        st.markdown(
+            '<div style="margin-top:18px;padding-top:14px;'
             'border-top:1px solid var(--border);'
             'font-family:var(--font-mono);font-size:9px;color:var(--text-muted);'
             'letter-spacing:0.16em;text-transform:uppercase;line-height:1.6;">'
@@ -396,7 +424,7 @@ def masthead(section: str = "") -> None:
 
 
 def page_shell(page_title: str) -> None:
-    """Top-of-page setup + masthead."""
+    """Top-of-page setup + masthead. Enforces login before anything else."""
     import config as _config
     st.set_page_config(
         layout                = "wide",
@@ -405,6 +433,9 @@ def page_shell(page_title: str) -> None:
         initial_sidebar_state = "expanded",
     )
     inject_theme()
+    # Auth gate — renders the login page and stops if no valid session
+    from session_manager import require_login
+    require_login()
     bootstrap_session_state()
     render_sidebar()
     masthead(page_title.upper())

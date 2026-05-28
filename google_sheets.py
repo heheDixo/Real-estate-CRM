@@ -51,58 +51,30 @@ def _log_error(scope: str, exc: Exception) -> None:
 # ── Auth ────────────────────────────────────────────────────────────────────
 
 
-def authenticate_sheets():
+def authenticate_sheets(credentials=None):
+    """
+    Build and return an authenticated Sheets API service.
+
+    If `credentials` is passed (from a logged-in Streamlit user), use them
+    directly. Otherwise (scheduler / background job), load the first user's
+    token from Supabase via google_auth_loader.
+    """
     try:
-        from google.oauth2.credentials import Credentials
-        from google.auth.transport.requests import Request
-        from google_auth_oauthlib.flow import InstalledAppFlow
         from googleapiclient.discovery import build
     except ImportError as exc:
         _log_error("sheets.import", exc)
         return None
 
-    creds = None
-    os.makedirs("data", exist_ok=True)
-
-    if os.path.exists(TOKEN_PATH):
-        try:
-            creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
-        except Exception as exc:
-            _log_error("sheets.token_read", exc)
-            creds = None
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception as exc:
-                _log_error("sheets.refresh", exc)
-                creds = None
-
-        if not creds:
-            if not os.path.exists(config.GOOGLE_CREDENTIALS_PATH):
-                _log_error(
-                    "sheets.credentials_missing",
-                    FileNotFoundError(config.GOOGLE_CREDENTIALS_PATH),
-                )
-                return None
-            try:
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    config.GOOGLE_CREDENTIALS_PATH, SCOPES,
-                )
-                creds = flow.run_local_server(port=0)
-            except Exception as exc:
-                _log_error("sheets.oauth_flow", exc)
-                return None
-
-        try:
-            with open(TOKEN_PATH, "w") as f:
-                f.write(creds.to_json())
-        except Exception as exc:
-            _log_error("sheets.token_write", exc)
+    if credentials is None:
+        from google_auth_loader import load_user_credentials_from_db
+        credentials = load_user_credentials_from_db(SCOPES)
+        if credentials is None:
+            _log_error("sheets.no_credentials",
+                       RuntimeError("No Google token in Supabase — sign in first"))
+            return None
 
     try:
-        return build("sheets", "v4", credentials=creds,
+        return build("sheets", "v4", credentials=credentials,
                      cache_discovery=False)
     except Exception as exc:
         _log_error("sheets.build", exc)

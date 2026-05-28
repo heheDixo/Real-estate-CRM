@@ -39,58 +39,30 @@ def _log_error(scope: str, exc: Exception) -> None:
 # ── Auth ────────────────────────────────────────────────────────────────────
 
 
-def authenticate_calendar():
+def authenticate_calendar(credentials=None):
+    """
+    Build and return an authenticated Calendar API service.
+
+    If `credentials` is passed (from a logged-in Streamlit user), use them
+    directly. Otherwise (scheduler / background job), load the first user's
+    token from Supabase via google_auth_loader.
+    """
     try:
-        from google.oauth2.credentials import Credentials
-        from google.auth.transport.requests import Request
-        from google_auth_oauthlib.flow import InstalledAppFlow
         from googleapiclient.discovery import build
     except ImportError as exc:
         _log_error("calendar.import", exc)
         return None
 
-    creds = None
-    os.makedirs("data", exist_ok=True)
-
-    if os.path.exists(TOKEN_PATH):
-        try:
-            creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
-        except Exception as exc:
-            _log_error("calendar.token_read", exc)
-            creds = None
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception as exc:
-                _log_error("calendar.refresh", exc)
-                creds = None
-
-        if not creds:
-            if not os.path.exists(config.GOOGLE_CREDENTIALS_PATH):
-                _log_error(
-                    "calendar.credentials_missing",
-                    FileNotFoundError(config.GOOGLE_CREDENTIALS_PATH),
-                )
-                return None
-            try:
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    config.GOOGLE_CREDENTIALS_PATH, SCOPES,
-                )
-                creds = flow.run_local_server(port=0)
-            except Exception as exc:
-                _log_error("calendar.oauth_flow", exc)
-                return None
-
-        try:
-            with open(TOKEN_PATH, "w") as f:
-                f.write(creds.to_json())
-        except Exception as exc:
-            _log_error("calendar.token_write", exc)
+    if credentials is None:
+        from google_auth_loader import load_user_credentials_from_db
+        credentials = load_user_credentials_from_db(SCOPES)
+        if credentials is None:
+            _log_error("calendar.no_credentials",
+                       RuntimeError("No Google token in Supabase — sign in first"))
+            return None
 
     try:
-        return build("calendar", "v3", credentials=creds,
+        return build("calendar", "v3", credentials=credentials,
                      cache_discovery=False)
     except Exception as exc:
         _log_error("calendar.build", exc)
@@ -115,7 +87,36 @@ def create_followup_event(service, calendar_id: str,
     if service is None or not calendar_id:
         return ""
 
-    followup_dt   = sent_date + datetime.timedelta(days=3)
+    # Build a timezone-aware follow-up datetime in config.TIMEZONE so the
+    # event isoformat carries the correct offset matching the timeZone
+    # field. Naive datetimes here cause Google to apply the local Mac TZ to
+    # the value while we *label* it config.TIMEZONE — the two disagree and
+    # reminders fire on a phantom time.
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(config.TIMEZONE)
+    except Exception:
+        tz = None
+
+    # Normalise sent_date to the configured timezone, then add 3 days
+    if tz is not None:
+        if sent_date.tzinfo is None:
+            sent_dt_local = sent_date.replace(tzinfo=tz)
+        else:
+            sent_dt_local = sent_date.astimezone(tz)
+        followup_dt = (sent_dt_local + datetime.timedelta(days=3)).replace(
+            hour=9, minute=30, second=0, microsecond=0,
+        )
+        followup_end = followup_dt.replace(hour=10, minute=0)
+        start_iso, end_iso = followup_dt.isoformat(), followup_end.isoformat()
+    else:
+        # zoneinfo unavailable — fall back to the old (broken) path
+        followup_dt = (sent_date + datetime.timedelta(days=3)).replace(
+            hour=9, minute=30, second=0, microsecond=0,
+        )
+        start_iso = followup_dt.isoformat()
+        end_iso   = followup_dt.replace(hour=10, minute=0).isoformat()
+
     first_name    = (prospect.get("contact_first_name") or
                      prospect.get("contact_name", "").split(" ")[0])
     last_name     = (prospect.get("contact_last_name") or
@@ -137,21 +138,17 @@ def create_followup_event(service, calendar_id: str,
         "summary": f"Follow up — {first_name} {last_name} · {company}",
         "description": description,
         "location": prospect.get("linkedin_url", ""),
-        "start": {
-            "dateTime": followup_dt.replace(
-                hour=9, minute=30, second=0, microsecond=0,
-            ).isoformat(),
-            "timeZone": config.TIMEZONE,
-        },
-        "end": {
-            "dateTime": followup_dt.replace(
-                hour=10, minute=0, second=0, microsecond=0,
-            ).isoformat(),
-            "timeZone": config.TIMEZONE,
-        },
+        "start": {"dateTime": start_iso, "timeZone": config.TIMEZONE},
+        "end":   {"dateTime": end_iso,   "timeZone": config.TIMEZONE},
+        # Three reminders: 1 day before (email + popup) so the broker has
+        # actual lead time, plus a 30-min popup right before the slot.
         "reminders": {
             "useDefault": False,
-            "overrides":  [{"method": "popup", "minutes": 30}],
+            "overrides": [
+                {"method": "email", "minutes": 24 * 60},   # 1 day before
+                {"method": "popup", "minutes": 24 * 60},   # 1 day before
+                {"method": "popup", "minutes": 30},        # 30 min before
+            ],
         },
     }
 
