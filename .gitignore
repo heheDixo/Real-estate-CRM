@@ -6,7 +6,12 @@
 
 # Google OAuth client secret + cached user tokens
 credentials.json
+client_secret*.json
 data/*_token.json
+
+# Broker correspondence archive (real names / bodies) — kept local only
+data/approved_emails.json
+data/tone_archive.json
 
 # ── Per-run pipeline output (regenerated daily) ──────────────────────────
 data/morning_run_*.json
