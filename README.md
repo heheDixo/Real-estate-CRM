@@ -2,7 +2,7 @@
 
 **A morning research agent for tenant rep brokers — from overnight signal scan to reviewed Gmail draft in one screen.**
 
-Each morning at 05:00 ET the pipeline runs unattended: discovers fresh NYC prospects, scrapes free signal sources for the watchlist, scores every company with `facebook/bart-large-mnli`, and drafts personalised email + LinkedIn copy with `mistralai/Mistral-7B-Instruct-v0.2`. By the time the broker opens Streamlit at 07:00, every actionable lead has a Gmail draft waiting and a research brief explaining *why* it's actionable today.
+Each morning at 05:00 ET the pipeline runs unattended: discovers fresh NYC prospects, scrapes free signal sources for the watchlist, scores every company with `facebook/bart-large-mnli`, and drafts personalised email + LinkedIn copy with `meta-llama/Llama-3.1-8B-Instruct` (Mistral-7B-Instruct-v0.2 was the original writer; it was retired from the free `hf-inference` provider in mid-2025 — see [PROGRESS.md](PROGRESS.md) §5). By the time the broker opens Streamlit at 07:00, every actionable lead has a Gmail draft waiting, a research brief explaining *why* it's actionable today, and a Telegram morning brief on their phone.
 
 Nothing sends without the broker's approval.
 
@@ -42,8 +42,8 @@ The whole pipeline is a single APScheduler cron firing at `RESEARCH_CRON_HOUR:RE
    - *company needs more office space*
    Composite = weighted mean of the top two signal scores (0.7) + the rest (0.3), bounded 0–100. Tiers: **Hot 🔥 ≥75**, **Warm ☀️ ≥50**, **Nurture ❄️ below 30 skipped**.
 4. **Builds per-label signal cards** via `_snippet_for_label()` — picks the sentence from the winning article that actually mentions a keyword for the label, so the five cards don't all parrot the same blob. When the winning article is the company-website pseudo-article *and* no label-keyword appears in the body, the signal is suppressed entirely (phantom-score guard).
-5. **Drafts** an email + LinkedIn message via Mistral-7B for every actionable lead in the chosen tone (Direct / Warm / Consultative).
-6. **Pushes** every draft to Gmail Drafts via the Gmail API, logs the digest, and (optionally) emails the broker a summary.
+5. **Drafts** an email + LinkedIn message via Llama-3.1-8B for every actionable lead in the chosen tone (Direct / Warm / Consultative). All HF calls go through `hf_client.py` — 3 retries with 2s/4s/8s backoff, scorer results cached in Supabase, template fallback when the writer is down.
+6. **Pushes** every draft to Gmail Drafts via the Gmail API, sends a Telegram morning brief to every connected user, logs the digest, and (optionally) emails the broker a summary. Pipeline failure + warm-up failure also alert via Telegram.
 
 Output lands in `data/morning_run_<YYYY-MM-DD>.json`. The Streamlit app reads from that file — no live re-scraping when the broker opens the UI.
 
@@ -69,28 +69,35 @@ Reads from Google Calendar. Blue date badges, purple suggested-angle callouts (d
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│  pages/        Streamlit UI (5 = home, 3 = review, 6/7 = log)  │
-│      ↓ reads data/morning_run_*.json, calls run_now()          │
+│  pages/                Streamlit UI                            │
+│      ↓ require_login() → reads Supabase + morning_run JSON     │
 ├────────────────────────────────────────────────────────────────┤
-│  scheduler.py  APScheduler cron + run_morning_pipeline()       │
-│      ↓ parallel ThreadPool over watchlist + discovered leads   │
+│  oauth_server.py       FastAPI sidecar — /oauth/* + /telegram  │
+│  session_manager.py    Streamlit auth gate + dark login page   │
+│  google_auth_loader.py Rehydrates Google creds in non-UI code  │
+├────────────────────────────────────────────────────────────────┤
+│  scheduler.py          APScheduler — 04:50 warm-up, 05:00 pipe │
+│      ↓ run_morning_pipeline_safe (try/except + alert mirror)   │
 ├────────────────────────────────────────────────────────────────┤
 │  research_agent.py     bart-mnli scoring + Signal construction │
 │  lead_discovery.py     new-lead candidates from free sources   │
-│  hf_models/writer.py   Mistral-7B email + LinkedIn draft       │
-│      ↓ HF router endpoint (router.huggingface.co)              │
+│  hf_models/writer.py   Llama-3.1-8B email + LinkedIn draft     │
+│  hf_client.py          retry + cache + warm-up + fallback      │
+│      ↓ HF router (bart on hf-inference, Llama on /v1/chat)     │
 ├────────────────────────────────────────────────────────────────┤
 │  scrapers/             google_news · newsapi · firecrawl       │
 │  gmail_drafts.py       Gmail API — drafts + digest send        │
 │  google_sheets.py      Sheets API — append sent rows           │
 │  google_calendar.py    Calendar API — follow-up events         │
-│      ↓ all three share one credentials.json + per-service token│
+│  telegram_bot.py       Telegram Bot API — brief + alerts       │
+│  monitoring.py         SMTP_SSL email alerts                   │
 ├────────────────────────────────────────────────────────────────┤
+│  database.py           Supabase CRUD; JSON fallback everywhere │
 │  config.py             env vars, prompts, thresholds, theme    │
 └────────────────────────────────────────────────────────────────┘
 ```
 
-The single rule: pages read JSON, scheduler writes JSON, and the API connectors live behind their own module so a key missing for one service doesn't break the others.
+The single rule: pages read Supabase (with JSON as fallback), scheduler writes Supabase, and every connector lives behind its own module so a key missing for one service doesn't break the others. Detailed walkthrough in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
@@ -101,7 +108,9 @@ The single rule: pages read JSON, scheduler writes JSON, and the API connectors 
 - Python 3.11
 - A terminal
 - A Google account (for Gmail / Sheets / Calendar — one OAuth client covers all three)
-- A free HuggingFace token
+- A free HuggingFace token (route scoring through `hf-inference` and writing through `/v1/chat/completions` — $0.10/mo free credits per HF account)
+- A Supabase project (free tier — URL + anon key)
+- A Telegram bot token from @BotFather (optional, only needed for the morning brief notification)
 
 ### One-time setup
 
@@ -115,21 +124,42 @@ pip install -r requirements.txt
 cp .env.example .env              # then fill in keys
 ```
 
-For Google integration, download an OAuth client (`Desktop app` type) from Google Cloud Console and save it as `credentials.json` at the project root. Enable the Gmail API, Sheets API, and Calendar API on the same project. First run will open a browser for consent and cache per-service tokens under `data/gmail_token.json` / `data/sheets_token.json` / `data/calendar_token.json`.
+For Google integration, create an OAuth 2.0 client (**Web application** type, not Desktop — Phase 2 moved auth to a browser flow) at Google Cloud Console. Add `http://localhost:8000/oauth/callback` as an authorised redirect URI. Enable Gmail, Sheets, Calendar, and Docs APIs on the same project. Tokens persist in Supabase (`users.google_token` JSONB), refreshed automatically by [`google_auth_loader.py`](google_auth_loader.py) — no more per-service JSON token files.
+
+For Supabase, create a free project, run [`setup_database.sql`](setup_database.sql) in the SQL editor once, then put `SUPABASE_URL` + `SUPABASE_ANON_KEY` in `.env`. The one-time migration of seed JSON into the DB is `python migrate_json_to_db.py` (idempotent for prospects + tone profile; don't re-run for approved_emails — it has no natural unique key).
+
+For Telegram, message @BotFather → `/newbot` → grab the token → put `TELEGRAM_BOT_TOKEN` + `TELEGRAM_BOT_USERNAME` in `.env`. The connect banner on the research page generates a one-tap deep link.
+
+Full deployment notes — including Google OAuth consent screen scopes, Supabase RLS plan, and Telegram webhook registration — are in [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ### Running
 
+Two terminals (the FastAPI sidecar handles OAuth callback + the Telegram webhook):
+
 ```bash
+# Terminal 1 — OAuth + Telegram sidecar
 source venv/bin/activate
+uvicorn oauth_server:app --host 0.0.0.0 --port 8000 --reload
 
-# Streamlit (default — the broker's view)
+# Terminal 2 — Streamlit (the broker's view)
+source venv/bin/activate
 streamlit run app.py
+```
 
+Visit http://localhost:8501 → "Sign in with Google".
+
+Other commands:
+
+```bash
 # Pipeline once, on demand
 python scheduler.py --once
 
-# Scheduler daemon (runs the cron forever)
+# Scheduler daemon (runs the 04:50 warm-up + 05:00 pipeline forever)
 python scheduler.py
+
+# Telegram polling — local-dev only; production uses the webhook on the
+# FastAPI sidecar
+python -c "from telegram_bot import run_polling; run_polling()"
 ```
 
 If `START_SCHEDULER=true` in `.env`, the Streamlit app spawns the scheduler in a background thread automatically — no separate process needed for local use.
@@ -142,18 +172,25 @@ All keys live in your local `.env` file and are never shared or hardcoded. Anyth
 
 | Key | Required? | Purpose |
 |---|---|---|
-| `HF_TOKEN` | yes | bart-mnli scoring + Mistral drafting via HuggingFace Inference (router endpoint) |
-| `APOLLO_API_KEY` | recommended | Apollo.io free tier — Organization Search + People Search (unlimited free for name/title/LinkedIn; ~120 email-reveal credits/month) |
+| `HF_TOKEN` | yes | bart-mnli scoring (via `hf-inference`) + Llama-3.1-8B drafting (via `/v1/chat/completions`) |
+| `SUPABASE_URL` / `SUPABASE_ANON_KEY` | yes | Database backing every CRUD path — Phase 1 |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | yes for Gmail/Sheets/Calendar/Docs | Web-app OAuth client — Phase 2 |
+| `GOOGLE_REDIRECT_URI` | yes | Default `http://localhost:8000/oauth/callback`; update for deploy |
+| `FASTAPI_URL` / `STREAMLIT_URL` | yes | Sidecar + UI URLs (defaults `localhost:8000` / `localhost:8501`) |
+| `ALLOWED_EMAILS` | recommended | Comma-separated whitelist of emails allowed to complete Google sign-in |
+| `TELEGRAM_BOT_TOKEN` | optional | Morning brief + alerts via Telegram — Phase 4 |
+| `TELEGRAM_BOT_USERNAME` | optional | Bot username (no @) used to build the connect deep link |
+| `APOLLO_API_KEY` | recommended | Apollo.io free tier — Organization Search + People Search |
 | `NEWSAPI_KEY` | recommended | NewsAPI free tier (~100 req/day, last 30 days) |
 | `FIRECRAWL_API_KEY` | recommended | Company website scraping |
 | `HUNTER_API_KEY` | optional | Email enrichment fallback when Apollo doesn't return a verified address |
-| `GOOGLE_CREDENTIALS_PATH` | yes for Gmail/Sheets/Calendar | path to `credentials.json` (default: project root) |
+| `GMAIL_SENDER` / `GMAIL_APP_PASSWORD` / `ALERT_EMAIL` | optional | SMTP alert mirror for pipeline + warm-up failures (`monitoring.py`) |
 | `SHEETS_SPREADSHEET_ID` | optional | target sheet for the sent-tracker |
 | `CALENDAR_ID` | optional | target calendar for follow-up events (default: primary) |
 | `BROKER_EMAIL` | optional | who the morning digest is sent to |
 | `AGENT_NAME` / `FIRM_NAME` / `AGENT_EMAIL` | recommended | signature block in drafts |
 | `TIMEZONE` | optional | default `America/New_York` |
-| `RESEARCH_CRON_HOUR` / `_MINUTE` | optional | default 5:00 |
+| `RESEARCH_CRON_HOUR` / `_MINUTE` | optional | default 5:00 (warm-up fires at 4:50) |
 | `START_SCHEDULER` | optional | `true` makes Streamlit spin up the background scheduler |
 
 Google News RSS needs no key.
@@ -227,6 +264,9 @@ The watchlist itself accumulates: discovered leads the broker approved last week
 | "Send now" is greyed out | The watchlist entry has no `contact_email`. Edit the field directly in the draft-review screen (it persists back to `data/watchlist.json`). |
 | HF returns 401/403 | Renew the token at huggingface.co → Settings → Access Tokens (read scope is enough). |
 | HF returns "Not Found" | The `api-inference.huggingface.co` host was deprecated in 2025 — `config.HF_API_BASE` must point at `https://router.huggingface.co/hf-inference/models`. |
+| Writer returns `"Model not supported by provider hf-inference"` | Mistral was retired from the free `hf-inference` provider in mid-2025. Writer must be a model that routes through `/v1/chat/completions` (current default: `meta-llama/Llama-3.1-8B-Instruct`). |
+| Drafts are all template fallbacks | `$0.10/mo` HF free credits exhausted. Top up at huggingface.co/settings/billing or subscribe to PRO ($9/mo → $2/mo credits). |
+| Telegram brief not arriving | (1) Did you `/start <user_id>` the bot? Check `users.telegram_connected` in Supabase. (2) Is `TELEGRAM_BOT_TOKEN` set in `.env`? (3) For production, did you register the webhook? |
 | Streamlit can't import `apscheduler` / `google.oauth2` | You're running the system Python rather than the venv. `source venv/bin/activate` and try again. |
 | `data/morning_run_*.json` missing | The cron hasn't fired yet today. Either wait for 05:00 ET, click **Run pipeline** in the UI, or run `python scheduler.py --once`. |
 

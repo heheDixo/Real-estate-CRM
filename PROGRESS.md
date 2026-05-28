@@ -1,8 +1,9 @@
 # Progress so far — CRE Outreach Intelligence
 
-Status as of **2026-05-28**. Covers the work delivered in Phase 1 (database
-foundation) and Phase 2 (Google OAuth login). Phases 3 (research-pipeline
-hardening) and 4 (Telegram bot) are not yet started.
+Status as of **2026-05-28**. Covers Phase 1 (database foundation),
+Phase 2 (Google OAuth login), Phase 3 (HuggingFace model hardening) and
+Phase 4 (Telegram bot). Phase 5 (production deployment to Railway / Fly /
+Render with public webhook) is the next thing on the list.
 
 ---
 
@@ -19,11 +20,14 @@ commercial real-estate tenant representation. The morning pipeline:
    roles, then `bart-large-mnli` (zero-shot classification on HuggingFace
    Inference API) scores the bundle against five CRE-relevant labels:
    hiring, funding, expansion, lease, space-need.
-3. **Drafts** an outreach email + LinkedIn message via Mistral (HF Inference
-   API), wrapped in a tone profile learned from the broker's past approved
-   emails.
-4. **Pushes** hot leads to Gmail Drafts, optionally sends a 7 AM digest, and
-   creates a 5-day follow-up event on Google Calendar after the broker hits
+3. **Drafts** an outreach email + LinkedIn message via Llama-3.1-8B-Instruct
+   (HF Inference Providers, OpenAI-style chat-completions endpoint),
+   wrapped in a tone profile learned from the broker's past approved
+   emails. Mistral-7B-Instruct-v0.2 used to be the writer; it was retired
+   from the free `hf-inference` provider in mid-2025 — see Phase 3.
+4. **Pushes** hot leads to Gmail Drafts, sends a Telegram morning brief to
+   every connected user, optionally sends a 7 AM email digest, and creates
+   a 5-day follow-up event on Google Calendar after the broker hits
    "Send now".
 
 The UI is a Streamlit dark editorial dashboard (`/`, `/draft_review`,
@@ -38,7 +42,8 @@ a live progress bar.
 | UI | Streamlit 1.35 (dark editorial theme via custom CSS) |
 | Auth server | FastAPI + uvicorn (sidecar on port 8000) |
 | Database | Supabase (Postgres + PostgREST) with local JSON fallback |
-| LLM | HuggingFace Inference API (bart-mnli, Mistral) |
+| LLM | HuggingFace Inference API (bart-mnli scorer via `hf-inference`; Llama-3.1-8B writer via `/v1/chat/completions`) |
+| Notifications | Telegram Bot API (morning brief + alert mirrors) |
 | Discovery | Google News RSS, NewsAPI, BuiltInNYC, HN Algolia |
 | Enrichment | Apollo, Greenhouse / Ashby / Lever, Hunter.io, Firecrawl |
 | Outbound | Gmail API (drafts + send), Google Sheets, Calendar, Docs |
@@ -251,7 +256,179 @@ allowed list:   1 email  — dixit.rahul1301@gmail.com
 
 ---
 
-## 5. How to run locally
+## 5. Phase 3 — HuggingFace model hardening (✅ complete)
+
+Goal: make the morning pipeline never crash on an HF outage. Retry +
+backoff every call, cache zero-shot results so the same text/labels are
+never re-scored, fall back to a template draft when the writer is down,
+ping both models 10 minutes before the cron fires, and wrap the cron job
+itself so a crash logs to Supabase + emails the broker instead of dying
+silently.
+
+### What landed
+
+**New**
+- [`hf_client.py`](hf_client.py) — resilient wrapper around HF Inference.
+  Public surface:
+    * `classify_zero_shot(text, candidate_labels, fallback_scores=None)`
+      — 3 retries with 2s/4s/8s backoff, 30s timeout, Supabase score
+      cache via `make_cache_key`/`get_cached_score`/`save_cached_score`,
+      equal-distribution fallback when all retries fail
+    * `generate_text(prompt, model, max_new_tokens, temperature,
+      fallback_text)` — same retry shape, returns `fallback_text` on
+      failure
+    * `warm_up_models()` — pings scorer + writer, returns
+      `{"scorer": bool, "writer": bool}`
+  Implemented with `requests` rather than `huggingface_hub`'s
+  `InferenceClient` because the 0.23.2 client defaults to the deprecated
+  `api-inference.huggingface.co` host and rejects the router payload.
+- [`monitoring.py`](monitoring.py) — `send_alert(subject, body)` over
+  `SMTP_SSL` (silent no-op when GMAIL_SENDER / GMAIL_APP_PASSWORD /
+  ALERT_EMAIL not set) + `alert_pipeline_failed(error, run_date)`.
+
+**Modified**
+- [`research_agent.py`](research_agent.py) — `_classify` swapped from
+  ~75 lines of inline `requests` + retry to one
+  `hf_client.classify_zero_shot` call; signal-construction logic
+  untouched.
+- [`hf_models/writer.py`](hf_models/writer.py) — `_call_hf_api`
+  delegated to `hf_client.generate_text`; new
+  `_build_fallback_draft(prospect_name, top_hook, sign_off)` at the
+  bottom of the file for the deepest-fallback case.
+- [`scheduler.py`](scheduler.py) —
+    * `run_morning_pipeline_safe()` wraps the raw pipeline (catches every
+      exception, logs `pipeline_runs` row, sends alert email)
+    * `_run_warmup()` fires at 4:50am and alerts if either model is
+      unreachable
+    * both blocking + background schedulers register the new warm-up job
+    * `--once` uses the safe wrapper
+
+### Mistral retirement + Llama swap
+
+Mid-2025, HF narrowed the free `hf-inference` provider to CPU / legacy
+models only (BERT, GPT-2, embeddings, text-classification — which is why
+`facebook/bart-large-mnli` still works there). Every text-generation
+model — Mistral-7B-Instruct-v0.2, Mistral-7B-Instruct-v0.3, Llama,
+Qwen, Gemma, Zephyr, Phi — returns
+`{"error":"Model not supported by provider hf-inference"}` from the old
+`/hf-inference/models/{model}` URL.
+
+The router's OpenAI-compatible `/v1/chat/completions` endpoint auto-picks
+a paid provider (Together, Fireworks, etc), drawing from the **$0.10/mo
+free credits** per free HF account ($2.00/mo on PRO). So the swap was:
+
+- `config.WRITING_MODEL` → `meta-llama/Llama-3.1-8B-Instruct`
+- `config.HF_CHAT_URL`  → `https://router.huggingface.co/v1/chat/completions`
+- `hf_client.generate_text` now POSTs OpenAI-style chat completions
+  (`{"model": ..., "messages": [{"role": "user", "content": prompt}]}`)
+  and reads `choices[0].message.content`
+- Legacy Mistral `[INST]/[/INST]/<s>/</s>` markers are stripped inside
+  `generate_text` so the existing prompt builders in `writer.py` and
+  `scheduler._generate_draft` need no edits
+
+### State right now
+
+```
+hf_client.classify_zero_shot     working  — bart-mnli on hf-inference
+hf_client.generate_text          working  — Llama-3.1-8B via /v1/chat/completions
+score_cache                      populated — cache hit ~0.4s on repeats
+pipeline_runs                    logging  — every safe-wrapper run inserts a row
+Phase-3 template fallback        wired    — fires when generate_text returns ""
+```
+
+### Known gaps
+
+- **`$0.10/mo free credits exhaust in ~3-5 days** at 20 prospects/day × 2
+  calls. After that the writer returns `""` and the template fallback
+  takes over — every prospect still gets a Gmail draft, just less
+  personalised. Options: HF PRO ($9/mo → $2 credits), pay-as-you-go
+  topup, or swap to a self-hosted writer.
+- **Llama doesn't always emit `Subject:` on line 1**, so `_parse_email`
+  occasionally returns the default subject "Quick thought on your NYC
+  expansion". Body is real Llama output. A tighter instruction in
+  `writer._build_email_prompt` + `scheduler._generate_draft` would fix
+  it — small change, deferred.
+
+---
+
+## 6. Phase 4 — Telegram bot (✅ complete)
+
+Goal: push the daily research summary to the broker's phone after the
+5am pipeline runs, mirror pipeline + warm-up failure alerts there too,
+and expose a one-tap connect banner on the research page. Webhook is
+ready; polling is the local-dev mirror.
+
+### What landed
+
+**New**
+- [`telegram_bot.py`](telegram_bot.py) — fire-and-forget wrapper around
+  the Telegram Bot API using plain `requests` (no `python-telegram-bot`
+  dep). Public surface:
+    * `send_message(chat_id, text)` — never raises
+    * `broadcast(text)` — fan-out to every connected user
+    * `send_morning_brief(chat_id, reports)` — formatted hot/warm/skipped
+      card with hot-lead hooks and dashboard deep-link
+    * `send_reply_notification(chat_id, ...)` — exposed for the future
+      Gmail reply-watcher (not wired yet)
+    * `send_pipeline_failed_alert` / `send_warmup_failed_alert`
+    * `get_connect_url(user_id)` — `t.me/<bot>?start=<uuid>` deep link
+    * `run_polling()` / `_handle_update()` — local-dev mirror of the
+      webhook; writes `telegram_chat_id` + `telegram_connected=true` on
+      `/start <uuid>`
+
+**Modified**
+- [`oauth_server.py`](oauth_server.py) — replaced the Phase-3 stub
+  `/telegram/webhook` with the real handler. Parses `/start <user_id>`,
+  upserts `users.telegram_*`, sends the "Connected" confirmation via
+  `telegram_bot.send_message`.
+- [`pages/5_morning_research.py`](pages/5_morning_research.py) — dark
+  connect banner immediately below `page_shell()`. Hidden once
+  `telegram_connected=true`; uses the user's Supabase UUID for the deep
+  link.
+- [`scheduler.py`](scheduler.py) — three Telegram hooks, each in its
+  own `try/except` so a Telegram outage cannot crash the pipeline:
+    * `run_morning_pipeline_safe` success branch loads the just-persisted
+      reports via `get_most_recent_reports` and pushes a morning brief
+      to every connected user
+    * exception branch mirrors `alert_pipeline_failed` via Telegram
+    * `_run_warmup` mirrors the warm-up failure email via Telegram
+
+**Config**
+- [`.env.example`](.env.example) — `TELEGRAM_BOT_TOKEN` +
+  `TELEGRAM_BOT_USERNAME`.
+- [`setup_database.sql`](setup_database.sql) already has
+  `users.telegram_chat_id text` and `users.telegram_connected boolean
+  default false` — confirmed at Phase 1.
+- [`database.py`](database.py) already has `get_all_telegram_users()` —
+  also from Phase 1.
+
+### State right now
+
+```
+@Grey_CreBot                live (bot id 8788815105)
+users.telegram_connected    true  for dixit.rahul1301@gmail.com
+users.telegram_chat_id      6042841719
+local polling               works — /start <uuid> captured, DB updated
+production webhook          route live at /telegram/webhook, awaiting
+                            setWebhook registration after Phase-5 deploy
+```
+
+### Known gaps
+
+- **No webhook registration yet.** `setWebhook` against the public host
+  is part of Phase 5. Polling is fine for laptop use; not for
+  production.
+- **Brief fires on every clean run**, including `no_actionable` days
+  where the watchlist returned no qualifying signals. Gating on
+  `summary["status"] == "success"` or `summary["actionable"] > 0` would
+  trim noise. 2-line change, deferred.
+- **Reply notifications are exposed but not wired.**
+  `send_reply_notification` is ready; the Gmail reply-watcher that
+  would call it isn't built yet.
+
+---
+
+## 7. How to run locally
 
 ```bash
 # One-time
@@ -279,13 +456,19 @@ slot):
 python scheduler.py --once
 ```
 
-## 6. Deferred decisions / next phases
+Telegram polling (local-dev only — production uses the webhook):
 
-**RLS plan (Phase 2.5, before onboarding the 2nd client).** Today every
+```bash
+python -c "from telegram_bot import run_polling; run_polling()"
+```
+
+## 8. Deferred decisions / next phases
+
+**RLS plan (Phase 4.5, before onboarding the 2nd client).** Every
 tenant-scoped table (`prospects`, `research_reports`, `sent_emails`,
 `approved_emails`, `tone_profiles`, `pipeline_runs`, `dismissed_leads`,
-`score_cache`) has no `user_id` column and RLS is off. Multi-tenant safe
-ordering is:
+`score_cache`) still has no `user_id` column and RLS is off. Multi-tenant
+safe ordering is:
 1. Add a nullable `user_id uuid references users(id)` column to every
    tenant-scoped table + an index.
 2. Backfill the existing rows to the single existing user.
@@ -297,14 +480,28 @@ ordering is:
 Doing it any earlier than Phase 2 would have made the app appear empty —
 RLS without authentication = closed policies = nothing readable.
 
-**Phase 3 (next).** Research-pipeline hardening — currently TBD scope.
+**Phase 5 (next).** Production deployment to Railway / Fly / Render.
+Procfile already declares `web` (Streamlit), `api` (uvicorn) and
+`worker` (scheduler). Outstanding work:
+- Pick a host and provision the three services.
+- Set every env var from `.env.example` on the host (including new
+  Phase-3/4 keys: `SUPABASE_*`, `GOOGLE_*`, `FASTAPI_URL`,
+  `STREAMLIT_URL`, `ALLOWED_EMAILS`, `TELEGRAM_BOT_TOKEN`,
+  `TELEGRAM_BOT_USERNAME`).
+- Update Google OAuth client to add the production
+  `…/oauth/callback` redirect URI.
+- Register the Telegram webhook against the public host:
+  `curl -X POST "https://api.telegram.org/bot$TOKEN/setWebhook" \
+      -d "url=https://<public-api-host>/telegram/webhook"`.
+- UptimeRobot (or similar) pinging `/health` so the worker container
+  stays warm.
 
-**Phase 4 (after Phase 3).** Telegram bot — stub already exists at
-`POST /telegram/webhook` in `oauth_server.py`. Will read users from the
-DB column `telegram_chat_id` (already in the schema) and broadcast the
-morning digest there.
+**Beyond Phase 5.** Reply-watcher (call `send_reply_notification` when
+Gmail detects a thread reply), tone-learning loop (mine
+`data/tone_archive.json` weekly to update `data/tone_profile.json`),
+compound-signal scoring trained on the broker's approve/skip history.
 
-## 7. Files you can safely delete
+## 9. Files you can safely delete
 
 After Phase 2 cutover, these old local-token files in `data/` are dead
 weight (the new auth never reads them):
