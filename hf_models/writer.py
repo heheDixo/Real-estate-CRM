@@ -274,53 +274,13 @@ class OutreachWriter:
         Returns:
             generated text string or empty string on failure
         """
-        params = dict(config.WRITING_PARAMS)
-        if max_tokens:
-            params["max_new_tokens"] = max_tokens
-
-        payload = {
-            "inputs":     prompt,
-            "parameters": params,
-        }
-
-        try:
-            response = requests.post(
-                self.MODEL_URL,
-                headers = self.headers,
-                json    = payload,
-                timeout = config.WRITING_TIMEOUT,
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-                if isinstance(data, list) and data:
-                    return data[0].get("generated_text", "").strip()
-                return ""
-
-            if response.status_code == 503:
-                import time
-                print("[Writer] Model loading. Waiting 20s...")
-                time.sleep(20)
-                response = requests.post(
-                    self.MODEL_URL,
-                    headers = self.headers,
-                    json    = payload,
-                    timeout = config.WRITING_TIMEOUT,
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    if isinstance(data, list) and data:
-                        return data[0].get("generated_text", "").strip()
-
-            print(f"[Writer] HF API returned {response.status_code}")
-            return ""
-
-        except requests.exceptions.Timeout:
-            print("[Writer] HF API timed out.")
-            return ""
-        except Exception as e:
-            print(f"[Writer] Error: {e}")
-            return ""
+        from hf_client import generate_text
+        return generate_text(
+            prompt=prompt,
+            max_new_tokens=max_tokens or 400,
+            temperature=0.7,
+            fallback_text="",
+        )
 
     # ──────────────────────────────────────────────────────────────────────────
     # Output parsing
@@ -605,3 +565,24 @@ class OutreachWriter:
 
 # Compatibility alias — the verification CLI imports DraftWriter
 DraftWriter = OutreachWriter
+
+
+def _build_fallback_draft(
+    prospect_name: str,
+    top_hook: str,
+    sign_off: str = "Michael"
+) -> str:
+    """
+    Template-based draft used when Mistral is completely unavailable.
+    Ensures Michael always has something in his Gmail drafts even if HF is down.
+    """
+    first_name = prospect_name.split()[0] if prospect_name else "there"
+    hook = top_hook if top_hook else "your company's recent growth trajectory"
+    return (
+        f"Hi {first_name},\n\n"
+        f"I've been following {hook} and wanted to reach out.\n\n"
+        f"Companies at your stage often find that space planning becomes "
+        f"a constraint before it becomes an obvious priority. Happy to share "
+        f"what we're seeing in the market — worth a quick call?\n\n"
+        f"Best, {sign_off}"
+    )

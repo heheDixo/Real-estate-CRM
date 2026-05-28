@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List
 
 import config
+import database
 
 DATA_DIR        = "data"
 WATCHLIST_PATH  = os.path.join(DATA_DIR, "watchlist.json")
@@ -418,7 +419,7 @@ def _load_active_icp_profile() -> Dict:
     — the sector / city of the first active watchlist entry seeds the search
     queries. Falls back to a neutral default if the watchlist is empty.
     """
-    wl = _read_json(WATCHLIST_PATH, [])
+    wl = database.get_watchlist(active_only=True)
     active = next((w for w in wl if w.get("active", True)), {})
     sector = active.get("sector") or "Technology"
     city   = active.get("city")   or "New York"
@@ -464,13 +465,18 @@ def run_morning_pipeline() -> Dict:
         from research_agent import save_discovered_leads
         discovered = discover_new_leads(icp, max_results=8)
         save_discovered_leads(discovered)
+        for lead in discovered:
+            try:
+                database.upsert_prospect(lead)
+            except Exception as exc:
+                _log_error("scheduler.upsert_discovered", exc)
     except Exception as exc:
         _log_error("scheduler.discover", exc)
     summary["discovered"] = len(discovered)
     _write_progress(20, f"Discovery done — {len(discovered)} candidates.")
 
     # ── 2. Combine watchlist + discovered (discovered marked approved=False) ─
-    watchlist = _read_json(WATCHLIST_PATH, [])
+    watchlist = database.get_watchlist(active_only=True)
     active    = [p for p in watchlist if p.get("active", True)]
     summary["watchlist"] = len(active)
 
@@ -618,6 +624,26 @@ def run_morning_pipeline() -> Dict:
     except Exception as exc:
         _log_error("scheduler.write_bundle", exc)
 
+    # Persist each report to Supabase (best-effort — JSON above is fallback)
+    for rep in reports:
+        try:
+            database.save_research_report(rep)
+        except Exception as exc:
+            _log_error("scheduler.save_research_report", exc)
+
+    # Log the pipeline run row
+    try:
+        database.log_pipeline_run(
+            status          = summary["status"],
+            prospects_count = summary["prospects"],
+            drafts_count    = summary["drafts_created"],
+            skipped_count   = summary["skipped"],
+            started_at      = summary["started_at"],
+            completed_at    = summary["completed_at"],
+        )
+    except Exception as exc:
+        _log_error("scheduler.log_pipeline_run", exc)
+
     _append_log(summary)
     _write_progress(100, summary["status"])
     return summary
@@ -626,6 +652,59 @@ def run_morning_pipeline() -> Dict:
 def run_now() -> Dict:
     """Synonym for run_morning_pipeline — exposed for Streamlit triggers."""
     return run_morning_pipeline()
+
+
+from monitoring import alert_pipeline_failed
+from database import log_pipeline_run
+
+def run_morning_pipeline_safe():
+    """
+    Safe wrapper around run_morning_pipeline().
+    Catches all exceptions, sends alert, logs to database.
+    The scheduler always calls this — never the raw function.
+    """
+    started_at = datetime.datetime.now().isoformat()
+    print(f"[scheduler] Pipeline starting at {started_at}")
+
+    try:
+        summary = run_morning_pipeline()
+        print(f"[scheduler] Pipeline complete — {summary.get('prospects', 0)} prospects")
+    except Exception as e:
+        completed_at = datetime.datetime.now().isoformat()
+        error_str = str(e)
+        print(f"[scheduler] Pipeline FAILED: {error_str}")
+        _log_error("scheduler.run_morning_pipeline_safe", error_str)
+        alert_pipeline_failed(error_str, datetime.date.today().isoformat())
+        log_pipeline_run(
+            status          = "failed",
+            prospects_count = 0,
+            drafts_count    = 0,
+            skipped_count   = 0,
+            error           = error_str,
+            started_at      = started_at,
+            completed_at    = completed_at,
+        )
+
+
+from hf_client import warm_up_models
+
+def _run_warmup():
+    """Wakes HF models from cold start before the 5am pipeline."""
+    print("[scheduler] Running model warm-up at 4:50 AM...")
+    status = warm_up_models()
+    print(f"[scheduler] Warm-up complete: {status}")
+
+    # Alert if models are unreachable
+    if not all(status.values()):
+        failed = [k for k, v in status.items() if not v]
+        from monitoring import send_alert
+        send_alert(
+            subject="HuggingFace models unreachable before pipeline",
+            body=(
+                f"Warm-up failed for: {', '.join(failed)}\n"
+                f"The 5am pipeline will use fallback drafts this morning."
+            )
+        )
 
 
 # ── Scheduler daemon ────────────────────────────────────────────────────────
@@ -641,7 +720,15 @@ def start_scheduler():
 
     sched = BlockingScheduler(timezone=config.TIMEZONE)
     sched.add_job(
-        run_morning_pipeline,
+        _run_warmup,
+        "cron",
+        hour=4,
+        minute=50,
+        timezone=config.TIMEZONE,
+        id="model_warmup",
+    )
+    sched.add_job(
+        run_morning_pipeline_safe,
         "cron",
         hour     = config.RESEARCH_CRON_HOUR,
         minute   = config.RESEARCH_CRON_MINUTE,
@@ -670,7 +757,15 @@ def start_scheduler_background():
 
     sched = BackgroundScheduler(timezone=config.TIMEZONE, daemon=True)
     sched.add_job(
-        run_morning_pipeline,
+        _run_warmup,
+        "cron",
+        hour=4,
+        minute=50,
+        timezone=config.TIMEZONE,
+        id="model_warmup",
+    )
+    sched.add_job(
+        run_morning_pipeline_safe,
         "cron",
         hour   = config.RESEARCH_CRON_HOUR,
         minute = config.RESEARCH_CRON_MINUTE,
@@ -687,7 +782,8 @@ def start_scheduler_background():
 if __name__ == "__main__":
     import sys
     if "--once" in sys.argv:
-        out = run_morning_pipeline()
-        print(json.dumps(out, indent=2))
+        print("Running pipeline once...")
+        run_morning_pipeline_safe()
+        print("Done.")
     else:
         start_scheduler()

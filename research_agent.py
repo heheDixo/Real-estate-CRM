@@ -184,75 +184,13 @@ def _classify(text: str, labels: List[str]) -> Dict[str, float]:
     if not text.strip() or not config.HF_AVAILABLE:
         return {}
 
-    headers = {
-        "Authorization": f"Bearer {config.HF_TOKEN}",
-        "Content-Type":  "application/json",
-    }
-    payload = {
-        "inputs":     text[:4000],   # bart-mnli typical input cap
-        "parameters": {"candidate_labels": labels, "multi_label": True},
-    }
-
-    try:
-        resp = requests.post(
-            _MODEL_URL, headers=headers, json=payload,
-            timeout=config.SCORING_TIMEOUT,
-        )
-    except requests.RequestException as exc:
-        _log_hf_error("research_agent.network",
-                       f"{type(exc).__name__}: {str(exc)[:280]}")
-        return {}
-
-    if resp.status_code == 503:
-        # model loading — wait once then retry
-        import time
-        time.sleep(20)
-        try:
-            resp = requests.post(
-                _MODEL_URL, headers=headers, json=payload,
-                timeout=config.SCORING_TIMEOUT,
-            )
-        except requests.RequestException as exc:
-            _log_hf_error("research_agent.network",
-                           f"{type(exc).__name__}: {str(exc)[:280]}")
-            return {}
-
-    if resp.status_code == 401 or resp.status_code == 403:
-        _log_hf_error(
-            "research_agent.auth",
-            f"HF returned {resp.status_code}. The HF_TOKEN in .env may be "
-            f"invalid or revoked. Renew at "
-            f"https://huggingface.co/settings/tokens (read scope is enough).",
-        )
-        return {}
-
-    if resp.status_code != 200:
-        _log_hf_error(
-            "research_agent.http",
-            f"HF returned {resp.status_code}. body={resp.text[:240]}",
-        )
-        return {}
-
-    try:
-        data = resp.json()
-    except ValueError:
-        _log_hf_error(
-            "research_agent.parse",
-            f"non-JSON response: {resp.text[:240]}",
-        )
-        return {}
-
-    # New router shape: list of {"label": str, "score": float}.
-    # Old shape:        {"labels": [...], "scores": [...]}.
-    if isinstance(data, list):
-        return {item.get("label", ""): float(item.get("score", 0.0))
-                for item in data
-                if isinstance(item, dict) and item.get("label")}
-    if isinstance(data, dict):
-        labels_out = data.get("labels", [])
-        scores_out = data.get("scores", [])
-        return dict(zip(labels_out, scores_out))
-    return {}
+    from hf_client import classify_zero_shot
+    result = classify_zero_shot(
+        text=text,
+        candidate_labels=labels,
+        fallback_scores=[1.0 / len(labels)] * len(labels),
+    )
+    return dict(zip(result.get("labels", []), result.get("scores", [])))
 
 
 # ── Signal construction ─────────────────────────────────────────────────────
