@@ -9,6 +9,7 @@ from typing import Dict, List
 import streamlit as st
 
 import config
+import database
 from ui_components import (
     page_shell,
     metric_card,
@@ -20,8 +21,34 @@ from ui_components import (
 page_shell("Sent Tracker")
 
 
+def _db_row_to_ui(r: Dict) -> Dict:
+    """Map a sent_emails DB row into the Sheets-style schema the UI expects."""
+    sent_at = (r.get("sent_at") or "")[:10]
+    reply_at = (r.get("reply_date") or "")[:10]
+    return {
+        "Date Sent":     sent_at,
+        "Company":       r.get("company") or "",
+        "Contact Name":  r.get("contact_name") or "",
+        "Contact Title": r.get("contact_title") or "",
+        "Contact Email": r.get("contact_email") or "",
+        "Email Subject": r.get("email_subject") or "",
+        "Score":         r.get("score") or "",
+        "Status":        r.get("status") or "",
+        "Reply Date":    reply_at,
+        "Notes":         r.get("notes") or "",
+    }
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _fetch_rows() -> List[Dict]:
+    # Supabase first
+    try:
+        db_rows = database.get_sent_emails(limit=500)
+        if db_rows:
+            return [_db_row_to_ui(r) for r in db_rows]
+    except Exception as exc:
+        st.warning(f"Database fetch failed: {exc}")
+    # Sheets fallback
     if not config.SHEETS_SPREADSHEET_ID:
         return []
     try:

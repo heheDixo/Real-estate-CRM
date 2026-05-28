@@ -1,26 +1,21 @@
 """
-Tone learner. Stores approved emails locally and extracts a writing-style
-profile that is injected into the Mistral writer's prompt so successive
-drafts converge toward the broker's actual voice.
+Tone learner. Stores approved emails and extracts a writing-style profile
+that is injected into the Mistral writer's prompt so successive drafts
+converge toward the broker's actual voice.
 
-No external API. Storage is plain JSON in ./data/.
+Storage is Supabase (with JSON fallback) via database.py.
 """
 
 from __future__ import annotations
 
-import datetime
 import json
-import os
 import re
 import statistics
 from typing import Dict, List
 
 import config
+import database
 
-
-DATA_DIR              = "data"
-TONE_PROFILE_PATH     = os.path.join(DATA_DIR, "tone_profile.json")
-APPROVED_EMAILS_PATH  = os.path.join(DATA_DIR, "approved_emails.json")
 
 _DEFAULT_PROFILE: Dict = {
     "avg_sentence_length": 12,
@@ -37,52 +32,25 @@ _DEFAULT_PROFILE: Dict = {
 }
 
 
-# ── File helpers (defensive) ────────────────────────────────────────────────
-
-
-def _ensure_dir():
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-
-def _read_json(path: str, default):
-    _ensure_dir()
-    if not os.path.exists(path):
-        with open(path, "w") as f:
-            json.dump(default, f, indent=2)
-        return default
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError) as exc:
-        print(f"[tone_learner] cannot read {path}: {exc} — using default.")
-        return default
-
-
-def _write_json(path: str, data):
-    _ensure_dir()
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-
-
 # ── Public API ──────────────────────────────────────────────────────────────
 
 
 def load_tone_profile() -> Dict:
-    """Load the tone profile, seeding the file with defaults on first read."""
-    return _read_json(TONE_PROFILE_PATH, dict(_DEFAULT_PROFILE))
+    """Load the tone profile from the database (with JSON fallback)."""
+    profile = database.get_tone_profile()
+    if not profile:
+        return dict(_DEFAULT_PROFILE)
+    # Backfill any missing keys with defaults so older saved profiles still work.
+    merged = dict(_DEFAULT_PROFILE)
+    merged.update(profile)
+    return merged
 
 
 def save_approved_email(subject: str, body: str,
-                          prospect_name: str = "") -> None:
-    """Append one approved email to the local archive."""
-    emails = _read_json(APPROVED_EMAILS_PATH, [])
-    emails.append({
-        "subject":       subject,
-        "body":          body,
-        "prospect_name": prospect_name,
-        "approved_at":   datetime.datetime.now().isoformat(),
-    })
-    _write_json(APPROVED_EMAILS_PATH, emails)
+                          prospect_name: str = "",
+                          tone_variant: str = "") -> None:
+    """Append one approved email to the archive (Supabase + JSON fallback)."""
+    database.save_approved_email(subject, body, prospect_name, tone_variant)
 
 
 def analyse_tone_from_emails(emails: List[str]) -> Dict:
@@ -105,17 +73,14 @@ def analyse_tone_from_emails(emails: List[str]) -> Dict:
             continue
         text = body.strip()
 
-        # word count of full body
         word_counts.append(len(text.split()))
 
-        # sentences
         sents = [s.strip() for s in re.split(r"[.!?]\s+", text) if s.strip()]
         if sents:
             for s in sents:
                 sentence_lengths.append(len(s.split()))
             openings.append(sents[0])
 
-        # sign-off: last non-empty line group
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         if len(lines) >= 2:
             sign_offs.append(lines[-2] + " " + lines[-1])
@@ -163,10 +128,10 @@ def build_tone_injection(profile: Dict) -> str:
 
 def update_tone_profile() -> Dict:
     """Re-read approved emails, regenerate the profile, persist it."""
-    archive = _read_json(APPROVED_EMAILS_PATH, [])
+    archive = database.get_approved_emails(limit=200)
     bodies  = [e.get("body", "") for e in archive if e.get("body")]
     profile = analyse_tone_from_emails(bodies)
-    _write_json(TONE_PROFILE_PATH, profile)
+    database.save_tone_profile(profile)
     return profile
 
 

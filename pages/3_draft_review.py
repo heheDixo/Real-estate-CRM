@@ -16,6 +16,7 @@ from email.mime.text import MIMEText
 import streamlit as st
 
 import config
+import database
 from research_agent import ResearchReport, load_morning_run, save_morning_run
 from ui_components import (
     page_shell,
@@ -68,23 +69,15 @@ def _persist_lead(updated: ResearchReport) -> None:
     except Exception:
         pass
 
-    # Mirror the edit to watchlist.json so the next pipeline run sees it too.
+    # Mirror the edit to the prospects table so the next pipeline run sees it too.
     try:
-        wl_path = os.path.join("data", "watchlist.json")
-        if os.path.exists(wl_path):
-            with open(wl_path) as f:
-                wl = json.load(f) or []
-            for i, w in enumerate(wl):
-                if (w.get("id") == updated.prospect_id
-                        or w.get("company") == updated.company):
-                    wl[i]["contact_email"] = updated.contact_email
-                    wl[i]["contact_name"]  = (updated.contact_name
-                                                or w.get("contact_name", ""))
-                    wl[i]["contact_title"] = (updated.contact_title
-                                                or w.get("contact_title", ""))
-                    with open(wl_path, "w") as f:
-                        json.dump(wl, f, indent=2)
-                    break
+        database.upsert_prospect({
+            "id":            updated.prospect_id,
+            "company":       updated.company,
+            "contact_email": updated.contact_email,
+            "contact_name":  updated.contact_name,
+            "contact_title": updated.contact_title,
+        })
     except Exception:
         pass
 
@@ -489,7 +482,33 @@ with draft_col:
                             )
                     try:
                         from tone_learner import save_approved_email
-                        save_approved_email(subject, body, lead.company)
+                        save_approved_email(subject, body, lead.company,
+                                            tone_variant=variant_choice)
+                    except Exception:
+                        pass
+
+                    # Log the send to the database
+                    try:
+                        database.log_sent_email({
+                            "prospect_id":      lead.prospect_id,
+                            "company":          lead.company,
+                            "contact_name":     lead.contact_name,
+                            "contact_title":    lead.contact_title,
+                            "contact_email":    lead.contact_email,
+                            "linkedin_url":     getattr(lead, "linkedin_url", ""),
+                            "email_subject":    subject,
+                            "email_body":       body,
+                            "linkedin_message": linkedin_msg,
+                            "research_signals": [s.title for s in lead.signals],
+                            "score":            lead.composite_score,
+                            "tier":             lead.tier,
+                            "tone_variant":     variant_choice,
+                            "top_signal_used":  lead.top_hook,
+                            "status":           "Sent",
+                            "sent_at":          datetime.datetime.now().isoformat(),
+                            "followup_date":    (datetime.date.today() +
+                                                 datetime.timedelta(days=5)).isoformat(),
+                        })
                     except Exception:
                         pass
 

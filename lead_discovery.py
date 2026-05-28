@@ -31,6 +31,7 @@ from typing import Dict, List, Optional
 import requests
 
 import config
+import database
 
 
 # ── Files ───────────────────────────────────────────────────────────────────
@@ -118,7 +119,7 @@ def _slugify(s: str) -> str:
 
 def _existing_watchlist_domains() -> set:
     out = set()
-    for p in _read_json(WATCHLIST_PATH, []):
+    for p in database.get_watchlist(active_only=False):
         if p.get("domain"):
             out.add(p["domain"].lower())
         if p.get("company"):
@@ -127,7 +128,11 @@ def _existing_watchlist_domains() -> set:
 
 
 def _dismissed_ids() -> set:
-    return set(_read_json(DISMISSED_PATH, []))
+    ids = set(database.get_dismissed_ids())
+    # Fold in the local JSON file too — covers the offline case where Supabase
+    # is unreachable and dismissals were captured to disk only.
+    ids.update(_read_json(DISMISSED_PATH, []))
+    return ids
 
 
 # ── Company-name extraction from article text ───────────────────────────────
@@ -754,10 +759,10 @@ def discover_new_leads(icp_profile: Dict, max_results: int = 10) -> List[Dict]:
 
 def approve_lead(lead: Dict) -> bool:
     """Move a discovered lead onto the watchlist."""
-    watch = _read_json(WATCHLIST_PATH, [])
     domain = (lead.get("domain") or "").lower()
+    watch = database.get_watchlist(active_only=False)
 
-    if any((w.get("domain") or "").lower() == domain for w in watch):
+    if domain and any((w.get("domain") or "").lower() == domain for w in watch):
         return False   # already there
 
     record = dict(lead)
@@ -765,8 +770,12 @@ def approve_lead(lead: Dict) -> bool:
     record["source"]     = "watchlist"
     record["added_at"]   = datetime.date.today().isoformat()
     record.setdefault("active", True)
-    watch.append(record)
-    _write_json(WATCHLIST_PATH, watch)
+    database.upsert_prospect(record)
+    # Mirror to local JSON too — keeps offline fallback in sync
+    wl = _read_json(WATCHLIST_PATH, [])
+    if not any((w.get("domain") or "").lower() == domain for w in wl):
+        wl.append(record)
+        _write_json(WATCHLIST_PATH, wl)
     return True
 
 
@@ -774,11 +783,12 @@ def dismiss_lead(lead_id: str) -> bool:
     """Add a discovered-lead id to the dismissal list so it never re-surfaces."""
     if not lead_id:
         return False
+    database.dismiss_prospect(lead_id)
+    # Mirror locally for offline fallback
     dismissed = _read_json(DISMISSED_PATH, [])
-    if lead_id in dismissed:
-        return True
-    dismissed.append(lead_id)
-    _write_json(DISMISSED_PATH, dismissed)
+    if lead_id not in dismissed:
+        dismissed.append(lead_id)
+        _write_json(DISMISSED_PATH, dismissed)
     return True
 
 

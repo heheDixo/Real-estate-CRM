@@ -29,12 +29,37 @@ def _scrub(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 import config
+import database
 from research_agent import (
     ResearchReport,
     load_morning_run,
     load_discovered_leads,
     save_morning_run,
 )
+
+
+_REPORT_FIELDS = {
+    "prospect_id", "company", "contact_name", "contact_email",
+    "signals", "composite_score", "tier", "top_hook", "skip_today",
+    "skip_reason", "source", "contact_title", "linkedin_url",
+    "sector", "approved", "headcount", "industry", "open_roles",
+    "office_roles", "ats", "research_doc_url", "draft", "stale",
+    "raw_articles", "raw_jobs", "generated_at",
+}
+
+
+def _row_to_report(row: dict) -> ResearchReport:
+    """Convert a Supabase research_reports row into a ResearchReport."""
+    d = {k: v for k, v in row.items() if k in _REPORT_FIELDS}
+    return ResearchReport.from_dict(d)
+
+
+def _load_reports() -> list:
+    """Prefer Supabase; fall back to the local morning_run JSON."""
+    rows = database.get_most_recent_reports()
+    if rows:
+        return [_row_to_report(r) for r in rows]
+    return load_morning_run()
 from ui_components import (
     page_shell,
     section_header,
@@ -138,7 +163,7 @@ def _run_pipeline_background():
     threading.Thread(target=_runner, daemon=True).start()
 
 
-reports  = load_morning_run()
+reports  = _load_reports()
 is_stale = bool(reports and reports[0].stale)
 today_label = datetime.date.today().strftime("%a, %b %d")
 
