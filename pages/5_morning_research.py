@@ -81,6 +81,41 @@ from ui_components import (
 page_shell("Research")
 
 
+# ── Telegram connect banner (Phase 4) ───────────────────────────────────────
+# page_shell() already ran require_login(); the user dict is in session_state.
+_user = st.session_state.get("current_user") or {}
+if _user.get("id") and not _user.get("telegram_connected"):
+    from telegram_bot import get_connect_url
+    _connect_url = get_connect_url(_user["id"])
+    st.markdown(
+        f"""
+        <div style="
+            background:#1a2332; border:1px solid #2d4a6e;
+            border-radius:8px; padding:12px 16px; margin-bottom:16px;
+            display:flex; align-items:center; justify-content:space-between;
+            flex-wrap:wrap; gap:10px">
+          <div>
+            <div style="font-size:13px;font-weight:500;color:#e6edf3">
+              📱 Get your morning brief on Telegram
+            </div>
+            <div style="font-size:11px;color:#8b949e;margin-top:2px">
+              Receive daily lead summaries and reply notifications on your phone
+            </div>
+          </div>
+          <a href="{_connect_url}" target="_blank" style="text-decoration:none">
+            <div style="
+                background:#229ed9; color:#ffffff;
+                border-radius:6px; padding:8px 18px;
+                font-size:12px; font-weight:500; white-space:nowrap">
+              Connect Telegram →
+            </div>
+          </a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 PROGRESS_PATH = os.path.join("data", "pipeline_progress.json")
 
 

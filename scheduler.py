@@ -669,12 +669,42 @@ def run_morning_pipeline_safe():
     try:
         summary = run_morning_pipeline()
         print(f"[scheduler] Pipeline complete — {summary.get('prospects', 0)} prospects")
+
+        # Phase 4 — push the morning brief to every connected Telegram user.
+        # Reports were just persisted to Supabase by run_morning_pipeline.
+        try:
+            from telegram_bot import send_morning_brief
+            from database import get_all_telegram_users, get_most_recent_reports
+            from types import SimpleNamespace
+
+            tg_users = get_all_telegram_users()
+            if tg_users:
+                reports = [SimpleNamespace(**r) for r in get_most_recent_reports()]
+                for tg_user in tg_users:
+                    chat_id = tg_user.get("telegram_chat_id")
+                    if chat_id and send_morning_brief(chat_id, reports):
+                        print(f"[scheduler] Morning brief sent to Telegram {chat_id}")
+        except Exception as tg_exc:
+            _log_error("scheduler.telegram_brief", tg_exc)
+
     except Exception as e:
         completed_at = datetime.datetime.now().isoformat()
         error_str = str(e)
         print(f"[scheduler] Pipeline FAILED: {error_str}")
         _log_error("scheduler.run_morning_pipeline_safe", error_str)
         alert_pipeline_failed(error_str, datetime.date.today().isoformat())
+
+        # Phase 4 — same alert via Telegram for users with bot connected.
+        try:
+            from telegram_bot import send_pipeline_failed_alert
+            from database import get_all_telegram_users
+            for tg_user in get_all_telegram_users():
+                chat_id = tg_user.get("telegram_chat_id")
+                if chat_id:
+                    send_pipeline_failed_alert(chat_id, error_str)
+        except Exception as tg_exc:
+            _log_error("scheduler.telegram_failure_alert", tg_exc)
+
         log_pipeline_run(
             status          = "failed",
             prospects_count = 0,
@@ -705,6 +735,17 @@ def _run_warmup():
                 f"The 5am pipeline will use fallback drafts this morning."
             )
         )
+
+        # Phase 4 — mirror the alert to Telegram.
+        try:
+            from telegram_bot import send_warmup_failed_alert
+            from database import get_all_telegram_users
+            for tg_user in get_all_telegram_users():
+                chat_id = tg_user.get("telegram_chat_id")
+                if chat_id:
+                    send_warmup_failed_alert(chat_id, failed)
+        except Exception as tg_exc:
+            _log_error("scheduler.telegram_warmup_alert", tg_exc)
 
 
 # ── Scheduler daemon ────────────────────────────────────────────────────────

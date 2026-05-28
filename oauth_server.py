@@ -208,8 +208,42 @@ async def oauth_callback(request: Request):
 
 
 @app.post("/telegram/webhook")
-async def telegram_webhook_stub(request: Request):
-    """Stub — implemented in Phase 4."""
+async def telegram_webhook(request: Request):
+    """
+    Telegram POSTs here for every message addressed to the bot. We only
+    care about /start <user_id> — that captures the broker's chat_id and
+    flips telegram_connected=true on their users row. Everything else is
+    ignored.
+    """
+    try:
+        data    = await request.json()
+        message = data.get("message", {})
+        chat_id = str(message.get("chat", {}).get("id", ""))
+        text    = message.get("text", "") or ""
+
+        if not chat_id or not text.startswith("/start"):
+            return {"ok": True}
+
+        parts   = text.split()
+        user_id = parts[1] if len(parts) > 1 else None
+
+        if user_id:
+            db = _db()
+            db.table("users").update({
+                "telegram_chat_id":   chat_id,
+                "telegram_connected": True,
+            }).eq("id", user_id).execute()
+
+            from telegram_bot import send_message
+            send_message(
+                chat_id,
+                "✅ *Connected\\!*\n\n"
+                "You'll receive your morning CRE brief here every day at 7am\\.\n\n"
+                "I'll also notify you when prospects reply to your emails\\.",
+            )
+    except Exception as e:
+        _log_error("telegram_webhook", str(e))
+
     return {"ok": True}
 
 
