@@ -8,7 +8,7 @@ This document captures the assumptions baked into that pipeline, the current lim
 
 ## Current state
 
-- **Real:** scraping (Google News RSS, NewsAPI free tier, Firecrawl), HuggingFace inference (bart-mnli on `hf-inference`, Llama-3.1-8B on `/v1/chat/completions`), Gmail Drafts + send, Google Sheets logging, Google Calendar follow-ups, Google Docs per-prospect dossiers, watchlist persistence, tone learning archive, Supabase persistence, Google OAuth login, Telegram morning brief + alerts.
+- **Real:** scraping (Google News RSS, NewsAPI free tier, Firecrawl, **LinkedIn job search via guest-API with 30s rate limit + retry-with-jitter — Phase 5**, LinkedIn snapshot via Google SERP), HuggingFace inference (bart-mnli on `hf-inference`, Llama-3.1-8B on `/v1/chat/completions`), Gmail Drafts + send, Google Sheets logging, Google Calendar follow-ups, Google Docs per-prospect dossiers, watchlist persistence, tone learning archive, Supabase persistence, Google OAuth login, Telegram morning brief + alerts, broker-email fan-out for digest + alerts (**Phase 6**), **Railway production deployment with 3-service triad (Phase 7 — live)**.
 - **Mock-free:** there is no `mock_data/` module any more. The watchlist seeds three real NYC companies (Oscar Health, Ramp, Notion Labs) so a first run produces real signals immediately.
 - **Removed:** Apollo, Proxycurl, LinkedIn scraping, Salesforce export, the four-step wizard, the per-source mock fallback layer (only the per-prospect `_mock_fallback` inside `research_agent` remains, and only fires when scrapers + bart-mnli both come back empty). Per-service `data/*_token.json` OAuth caches — replaced by `users.google_token` JSONB in Supabase.
 
@@ -86,9 +86,43 @@ If the same article surfaces in both Google News and NewsAPI, the URL-based dedu
 
 `hf_client` now retries every call 3× with 2s/4s/8s exponential backoff, caches scorer results in Supabase (`make_cache_key` on `text[:200]|labels`), and falls back to equal-distribution scores or template drafts when all retries fail. A 4:50am warm-up job pre-pings both models before the 5:00am pipeline. **What's still true:** there is no second inference provider — if the HF router itself goes down across all providers, the template fallback is the only path. Self-hosted Mistral / Llama would close that gap.
 
-### 8. No multi-user / multi-broker support
+### 8. No multi-user / multi-broker **data** support — but recipient fan-out is in (Phase 6)
 
-The pipeline is single-tenant. Tenant-scoped tables have no `user_id` column yet (RLS is off — deferred to Phase 4.5). `BROKER_EMAIL` and `AGENT_NAME` are single config values. Google OAuth + the email whitelist gate access to one broker today; the schema is ready to support more once Phase 4.5 lands the `user_id` columns and RLS policies.
+The pipeline is still single-tenant for data isolation. Tenant-scoped tables have no `user_id` column yet (RLS off — deferred to Phase 4.5). Every signed-in user sees the same watchlist, the same drafts, the same sent log.
+
+**What Phase 6 did add**:
+- `BROKER_EMAILS` (comma-separated list) — the morning digest fans out to every recipient with isolated try/except per send.
+- `ALERT_EMAILS` (comma-separated list) — failure / warm-up alerts CC every recipient in one SMTP session.
+- `ALLOWED_EMAILS` (was already plural) — multiple Google accounts can sign in.
+- Gmail Drafts + Send Now were already per-user (each user's OAuth token drives `service.users().drafts().create(userId="me")`).
+
+**What's still single by design**:
+- `GMAIL_SENDER` + `GMAIL_APP_PASSWORD` — SMTP authentication needs one auth pair. Failure alerts are sent *from* one mailbox (typically the operator's) *to* `ALERT_EMAILS`. Multi-account SMTP isn't a thing.
+- `AGENT_NAME` / `AGENT_TITLE` / `FIRM_NAME` / `AGENT_EMAIL` / `AGENT_PHONE` — baked into every writer prompt and every fallback signature. Changing them changes who the writer is impersonating across the whole deployment. Per-user identity needs the same Phase 4.5 `user_id` work + a `users.agent_profile` JSONB column.
+
+### 11. LinkedIn signal intermittency (Phase 5)
+
+`scrape_linkedin_jobs()` uses the public `/jobs-guest/jobs/api/seeMoreJobPostings/search` endpoint with a 30-second global rate limit and a single retry-with-jitter (45–90s) on empty result. In practice this lands ~50–70% success per call on the first attempt and ~85% after retry. The remaining failures are LinkedIn's silent rate limit — they return `200 OK` with an empty job-card list rather than a clear `429`. There's no in-pipeline metric tracking per-prospect success rate.
+
+**Mitigations available** but not implemented:
+- Egress-IP rotation via a residential proxy pool — closes the gap but adds cost.
+- Apollo paid tier — Apollo's job-postings feed is reliable and ToS-compliant. ~$49–99/mo per seat.
+- LinkedIn Partner API — requires partnership approval; not realistic for a single-broker deployment.
+
+The current architecture treats LinkedIn as a "free signal where available" source. On a bad LinkedIn day the news + website scrapers carry the signal; on a good day LinkedIn adds an unambiguous office-hiring or velocity signal that the news pipeline rarely surfaces.
+
+### 12. Microsoft 365 sign-in path (not yet built)
+
+Google OAuth is the only authentication path. Brokers on Google Workspace or `@gmail.com` accounts sign in fine. Brokers on **Microsoft 365** (every major CRE firm — Cushman & Wakefield, JLL, CBRE, Newmark) cannot complete the OAuth flow because their email isn't a Google identity. Google's OAuth consent screen rejects them as Test users with `"Email addresses must be associated with an active Google Account, Google Workspace account, or Cloud Identity account"`.
+
+Today's workaround: the broker creates a personal Gmail (e.g. `grey.mccarthy.cre@gmail.com`) and signs in with that. Drafts get created in the personal Gmail; the signature still says "Cushman & Wakefield" in the body. Recipients see a personal Gmail as the From address — less institutional but functional.
+
+A proper fix needs:
+1. Microsoft Graph OAuth alongside Google OAuth (different consent flow, different scopes).
+2. An `outlook_drafts.py` parallel to `gmail_drafts.py` using Graph's `/me/messages` endpoint.
+3. A `users.auth_provider` column to route the right credentials to the right send path.
+
+Roughly 2–3 days of code + scope review with the client's IT.
 
 ### 9. No instrumentation beyond JSON logs + email alerts + Telegram alerts
 

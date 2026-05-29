@@ -45,6 +45,8 @@ The single rule: **pages read Supabase (with JSON as fallback), the scheduler wr
 Pure constants. Reads `.env`, exposes typed module-level globals.
 
 - **HuggingFace** — `HF_TOKEN`, `HF_API_BASE = "https://router.huggingface.co/hf-inference/models"` (legacy CPU/classification path — only bart-mnli still works here), `HF_CHAT_URL = "https://router.huggingface.co/v1/chat/completions"` (OpenAI-style endpoint for chat models — used by `hf_client.generate_text`), `SCORING_MODEL = "facebook/bart-large-mnli"`, `WRITING_MODEL = "meta-llama/Llama-3.1-8B-Instruct"` (was Mistral-7B-Instruct-v0.2 until HF retired it from the free `hf-inference` provider in mid-2025), `SCORING_TIMEOUT`.
+- **Broker identity** — `AGENT_NAME`, `AGENT_TITLE`, `FIRM_NAME`, `AGENT_EMAIL`, `AGENT_PHONE`. **Phase 6**: `EMAIL_SYSTEM_PROMPT` / `LINKEDIN_SYSTEM_PROMPT` now interpolate `AGENT_TITLE` instead of hardcoding "senior tenant representation broker"; sign-off rule is three lines (name / title / firm). Fallback signatures across `scheduler._generate_draft` and `hf_models/writer.py` (`generate`, `_fallback_email`, `_fallback_linkedin`) all carry the same name / title / firm block.
+- **Email fan-out** (Phase 6) — `BROKER_EMAILS` (digest recipients, defaults to `[BROKER_EMAIL]`); `ALERT_EMAILS` (failure alert recipients, resolution chain `ALERT_EMAILS → ALERT_EMAIL → BROKER_EMAILS → BROKER_EMAIL`). SMTP authentication is still single-pair (`GMAIL_SENDER` + `GMAIL_APP_PASSWORD`) — Gmail protocol doesn't allow multi-account auth in one session.
 - **Data source keys** — `NEWSAPI_KEY`, `FIRECRAWL_API_KEY`, `HUNTER_API_KEY`. Each is treated as optional; the relevant scraper short-circuits when its key is missing.
 - **Google integration** — `GOOGLE_CREDENTIALS_PATH`, `SHEETS_SPREADSHEET_ID`, `CALENDAR_ID`, `BROKER_EMAIL`. All Gmail / Sheets / Calendar APIs share one OAuth client; each service caches its own token under `data/`.
 - **Scheduling** — `TIMEZONE`, `RESEARCH_CRON_HOUR`, `RESEARCH_CRON_MINUTE`, `DIGEST_SEND_HOUR`, `START_SCHEDULER`.
@@ -108,6 +110,12 @@ Firecrawl over the company website. Crawls `/`, `/about`, `/news` (best-effort).
 
 ### `scrapers/hunter_verify.py`
 Optional Hunter.io domain-search for email enrichment on discovered leads. No-op when `HUNTER_API_KEY` is missing.
+
+### `scrapers/linkedin_jobs.py` (Phase 5)
+Guest-API scrape of LinkedIn's public job search. Endpoint is `https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search` — the older `/jobs/search/` page is now auth-walled and returns a "Sign in" landing page with no job cards. Each call respects a **30s global rate limit** via a module-level `_last_request_time`. Public entry point `scrape_linkedin_jobs(company, city)` calls an inner `_scrape_attempt(...)` once; on empty result it sleeps `random.uniform(RETRY_SLEEP_MIN_SECONDS=45, RETRY_SLEEP_MAX_SECONDS=90)` and retries with a fresh random User-Agent. Per-job dict carries `is_office_signal` / `is_office_role` (both names — the existing `_build_signal_from_label` hiring branch checks `is_office_role`) and `is_growth_signal`. Module-level constant `SOURCE_LABEL = "LinkedIn Jobs · last 7 days"` is imported by `research_agent` so every signal card shows one consistent source string. `summarise_jobs(jobs, company)` returns the aggregate dict (total / office count / growth count / top_signal) used by the explicit injection block in `generate_report`.
+
+### `scrapers/linkedin_google.py` (Phase 5)
+Zero-LinkedIn-ban-risk snapshot via Google SERP scrape of `<company> site:linkedin.com/company`. Extracts follower / employee count text from the result snippet with three regex patterns (`X followers`, `X employees`, `X connections`). Returns `{found, employee_count_text, linkedin_url, snippet}`. Used as enrichment context, not as a primary signal.
 
 ---
 
@@ -227,7 +235,7 @@ The orchestrator. Phase 3 added a safe wrapper + warm-up; Phase 4 added Telegram
 - `_clean_web_text(text)` — strips markdown images, markdown links, bare URLs, US phone numbers, navigation chrome phrases (Skip to main content, Log in, Sign up, Menu, cookie / privacy boilerplate, language toggles). Applied before the Firecrawl text is injected into the article list.
 
 ### `_gather_signals(prospect)`
-For one prospect, runs Google News, NewsAPI, and Firecrawl. Folds the cleaned website text into the article list as a synthesised `Company website` entry **only if** the cleaned text is ≥120 chars (else it's just a tagline, useless for classification). Dedupes by URL, caps at 12 articles. Logs `scheduler.no_articles` when every source comes back empty.
+For one prospect, runs Google News, NewsAPI, and Firecrawl. Folds the cleaned website text into the article list as a synthesised `Company website` entry **only if** the cleaned text is ≥120 chars (else it's just a tagline, useless for classification). Dedupes by URL, caps at 12 articles. Logs `scheduler.no_articles` when every source comes back empty. **Phase 5 addition:** after the news + Firecrawl scrapes, also calls `scrape_linkedin_jobs(company, city)` and `get_linkedin_snapshot(company)`; results land in `bundle["jobs"]` and `bundle["linkedin_snapshot"]`. Both LinkedIn calls are guarded — exceptions log and return `[]` / `{}` so the rest of the bundle is unaffected.
 
 ### `_generate_draft(report, prospect, tone_injection, variant)`
 Builds a tone-prefixed Mistral prompt from the top hook + the three strongest signals, calls `OutreachWriter._call_hf_api()`, parses subject + body, falls back to the writer's template path on failure. Also generates a LinkedIn variant under 300 chars.
@@ -256,6 +264,12 @@ Returns the summary dict.
 Both register two jobs:
 - `model_warmup` at 04:50 → `_run_warmup`
 - `morning_research` at `RESEARCH_CRON_HOUR:RESEARCH_CRON_MINUTE` → `run_morning_pipeline_safe`, `misfire_grace_time=1800`.
+
+### Sequential prospect processing (Phase 5)
+Pre-Phase-5, `run_morning_pipeline` ran prospects through a `ThreadPoolExecutor(max_workers=4)`. Phase 5 switched to a **sequential for-loop** because LinkedIn's 30-second global rate limit is enforced in `scrapers/linkedin_jobs.py` via a module-level `_last_request_time` mutex. Running prospects in parallel would (a) just serialise behind the rate limiter anyway and (b) race on the shared `_last_request_time` state. Sequential is the honest model. At 4 active prospects × ~30-90s of LinkedIn budget per prospect, the morning run takes 3-7 minutes — well under the 1800s misfire grace, and the broker doesn't see results until ~07:00 ET anyway.
+
+### Broker-email fan-out (Phase 6)
+The digest send step loops over `config.BROKER_EMAILS` with a per-recipient `try/except` so one bad address doesn't stop the rest. `broker_self` (the filter that strips the broker's own address from draft "To" fields when the watchlist entry has no real contact) is widened to include the full `BROKER_EMAILS` list plus `AGENT_EMAIL` and `GMAIL_SENDER`. Resolution chain when only the singular is set: `BROKER_EMAILS = [BROKER_EMAIL]`.
 
 ---
 

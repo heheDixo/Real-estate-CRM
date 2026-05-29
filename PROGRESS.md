@@ -1,9 +1,16 @@
 # Progress so far — CRE Outreach Intelligence
 
-Status as of **2026-05-28**. Covers Phase 1 (database foundation),
-Phase 2 (Google OAuth login), Phase 3 (HuggingFace model hardening) and
-Phase 4 (Telegram bot). Phase 5 (production deployment to Railway / Fly /
-Render with public webhook) is the next thing on the list.
+Status as of **2026-05-29**. Covers Phase 1 (database foundation),
+Phase 2 (Google OAuth login), Phase 3 (HuggingFace model hardening),
+Phase 4 (Telegram bot), Phase 5 (LinkedIn signal scrapers + scoring
+tune), Phase 6 (broker-email fan-out + per-broker identity prompts),
+and Phase 7 (Railway production deployment — live as of this update).
+
+The production app is reachable at
+**https://web-production-a655b.up.railway.app** (Streamlit) and
+**https://api-production-7962b.up.railway.app** (FastAPI). Both
+services pass health checks; Telegram webhook registration and a final
+sign-in flight check are the only outstanding deploy steps.
 
 ---
 
@@ -462,7 +469,342 @@ Telegram polling (local-dev only — production uses the webhook):
 python -c "from telegram_bot import run_polling; run_polling()"
 ```
 
-## 8. Deferred decisions / next phases
+## 8. Phase 5 — LinkedIn signal scrapers + scoring tune (✅ complete)
+
+Goal: surface real hiring signals from LinkedIn job postings even when
+the news scrapers come back near-empty, and stop the scorer collapsing
+to the `_mock_fallback` score of 20 for mid-tier health-tech prospects.
+Commit: `a7db245`.
+
+### What landed
+
+**New**
+- [`scrapers/linkedin_jobs.py`](scrapers/linkedin_jobs.py) — guest-API
+  scrape of LinkedIn job search. Endpoint is
+  `https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search`
+  (the public `/jobs/search/` page is auth-walled). Each call respects
+  a **30s global rate limit** via module-level `_last_request_time`.
+  On empty result the public `scrape_linkedin_jobs()` retries once after
+  a `random.uniform(45, 90)` cooldown with a fresh random UA. Per-job
+  flags: `is_office_signal` / `is_office_role` (kept under both names
+  so the existing `_build_signal_from_label` path in `research_agent`
+  picks it up) + `is_growth_signal`. Single-source-of-truth label
+  constant `SOURCE_LABEL = "LinkedIn Jobs · last 7 days"` exposed for
+  every signal-construction site in `research_agent`.
+- [`scrapers/linkedin_google.py`](scrapers/linkedin_google.py) —
+  zero-ban-risk LinkedIn snapshot via Google SERP scrape of
+  `<company> site:linkedin.com/company`. Extracts follower / employee
+  count text from the snippet via three regexes. Used as enrichment,
+  not as a primary signal source.
+
+**Modified**
+- [`scheduler.py`](scheduler.py):
+  - `_gather_signals` now calls `scrape_linkedin_jobs(company, city)`
+    and `get_linkedin_snapshot(company)` after the news + Firecrawl
+    scrapes; results land in `bundle["jobs"]` and
+    `bundle["linkedin_snapshot"]`. The existing `_clean_web_text` +
+    URL-dedup logic for the article list is preserved.
+  - `run_morning_pipeline` switched from
+    `ThreadPoolExecutor(max_workers=4)` to a **sequential for-loop**
+    because LinkedIn's 30s rate limit is enforced as a global module
+    variable inside `linkedin_jobs.py` — parallel calls would just
+    serialise behind the limiter and risk concurrent mutation of
+    `_last_request_time`.
+- [`research_agent.py`](research_agent.py):
+  - `generate_report` now appends a deterministic LinkedIn signal
+    after the bart-mnli label loop, replacing any weaker LinkedIn
+    signal the existing hiring-label path produced. Scoring:
+    `office_signal_count >= 2 → 90`, `>= 1 → 75`,
+    `total_jobs >= 3 → 55`. Dedup is by case-insensitive `linkedin`
+    substring match on `Signal.source`.
+  - All 4 sites that previously set `source="LinkedIn Jobs"` now import
+    `SOURCE_LABEL` from `scrapers.linkedin_jobs`.
+- [`database.py`](database.py): `save_research_report` switched from
+  `insert()` to `upsert(row, on_conflict="run_date,prospect_id")` so a
+  re-run no longer duplicates rows. Requires the matching unique
+  constraint on `research_reports (run_date, prospect_id)` — run once
+  via the dedup SQL in commit message.
+- [`config.py`](config.py): `RESEARCH_SKIP_BELOW` lowered `30 → 15` so
+  warm leads surface while the watchlist is small.
+- [`data/watchlist.json`](data/watchlist.json): replaced the original
+  3-company seed (Oscar Health / Ramp / Notion Labs) with **five
+  health-tech NYC entries**: Northwell Health, CityMD, Ro, Cityblock,
+  Quartet Health. Quartet was flipped `active=false` after the rename
+  diagnostic showed it produces no real signal (small company, low
+  press, no LinkedIn job velocity). Important: company names were
+  iteratively trimmed to canonical forms ("Northwell Health Ventures"
+  → "Northwell Health", "Cityblock Health" → "Cityblock", "Ro Health"
+  → "Ro") so the news scrapers and LinkedIn search match the way the
+  press actually indexes them.
+- [`requirements.txt`](requirements.txt): added `beautifulsoup4` +
+  `lxml` for the LinkedIn HTML parse.
+
+### State right now
+
+```
+LinkedIn jobs scraper      working — ~50-70% success rate per call;
+                                     retry-with-jitter lifts to ~85%
+Sequential pipeline        ~4 active prospects × 30-90s LinkedIn budget
+                           ≈ 3-7 min total wall clock per run
+LinkedIn signal score      0/55/75/90 deterministic; replaces weak
+                           bart-mnli score where present
+Watchlist                  4 active (Northwell Health, CityMD, Ro,
+                           Cityblock) + 1 inactive (Quartet Health)
+Score floor                15 (was 30); warm-tier visible again
+```
+
+### Known gaps
+
+- **LinkedIn intermittency is real.** 200 OK with empty body is the
+  silent rate-limit signature. Retry helps but doesn't eliminate.
+  Cushwake doesn't surface in the morning brief on a bad day. No
+  in-pipeline metric tracks per-prospect LinkedIn success rate yet.
+- **Firecrawl 402** (free credits exhausted) was observed during the
+  scoring diagnostic. Pipeline handles it gracefully — the cleaned web
+  text just contributes nothing — but the per-prospect signal density
+  drops noticeably when Firecrawl is offline.
+- **`AGENT_TITLE` was unused in the writer prompts** until Phase 6 —
+  zero-shot Llama was told to act as "a senior tenant representation
+  broker" regardless of the env value. Pre-Phase-6 drafts therefore
+  carry the wrong title; existing rows in `research_reports.draft`
+  must be regenerated to pick up the new identity.
+
+---
+
+## 9. Phase 6 — Broker-email fan-out + per-broker identity (✅ complete)
+
+Goal: support multiple morning-digest recipients without per-broker
+config rewrites, and make sure every prompt and signature actually
+reflects the broker's real identity (name, title, firm) instead of
+the demo placeholder. Commits: `ceefad5`, `439637c`.
+
+### Fan-out — what landed
+
+**New env vars**
+- `BROKER_EMAILS` — comma-separated list. Every address gets the
+  morning digest. Defaults to `[BROKER_EMAIL]` when only the singular
+  is set (back-compat for older deploys).
+- `ALERT_EMAILS` — comma-separated list for failure / warm-up alerts.
+  Fallback chain on resolution:
+  `ALERT_EMAILS → ALERT_EMAIL → BROKER_EMAILS → BROKER_EMAIL`.
+
+**Code**
+- [`config.py`](config.py): exposes `BROKER_EMAILS: list[str]`.
+- [`monitoring.py`](monitoring.py): `ALERT_EMAILS` list; SMTP `sendmail`
+  sends to every address in one session (single auth pair — Gmail
+  protocol limit).
+- [`scheduler.py`](scheduler.py): `run_morning_pipeline` loops
+  `send_morning_digest` over `BROKER_EMAILS` with isolated try/except
+  per recipient — one bad address can't kill the rest. `broker_self`
+  filter (the "don't draft to the broker's own address" guard) widened
+  to include the full list.
+- [`check_env.py`](check_env.py): treats `BROKER_EMAIL` /
+  `BROKER_EMAILS` as either-or required; reports which one is in use.
+
+### Identity prompt fix — what landed
+
+- [`config.py`](config.py): `EMAIL_SYSTEM_PROMPT` and
+  `LINKEDIN_SYSTEM_PROMPT` previously hardcoded "a senior tenant
+  representation broker" / "a senior tenant rep broker" — `AGENT_TITLE`
+  was defined but never threaded into the prompt. Now both open with
+  `"You are {AGENT_NAME}, {AGENT_TITLE} at {FIRM_NAME}."` Sign-off
+  block expanded from two lines to three (name / title / firm).
+- Fallback signatures at four sites — [`scheduler.py:327`](scheduler.py)
+  + [`hf_models/writer.py:142,521,561`](hf_models/writer.py) — all
+  carry `AGENT_TITLE` between name and firm.
+
+### State right now (after Grey is set as the client)
+
+```
+AGENT_NAME    = Grey McCarthy
+AGENT_TITLE   = Director, Tenant Advisory Group
+FIRM_NAME     = Cushman & Wakefield
+AGENT_EMAIL   = Grey.Mccarthy@cushwake.com
+BROKER_EMAIL  = Grey.Mccarthy@cushwake.com   (legacy singular)
+BROKER_EMAILS = dixit + soham + grey         (digest fan-out)
+ALERT_EMAILS  = dixit + soham + grey         (failure alerts)
+ALLOWED_EMAILS = dixit + soham + grey        (sign-in whitelist)
+GMAIL_SENDER  = dixit.rahul1301@gmail.com    (operator SMTP — single
+                                              auth pair, by design)
+```
+
+### Known gaps
+
+- **Existing rows in `research_reports.draft` are stale.** Every draft
+  written before commit `439637c` says "Michael Hartley, Hartley CRE
+  Partners" because the demo defaults baked into the cached draft text.
+  Force-regenerate via `python scheduler.py --once` after Railway env
+  is correct, or `DELETE FROM research_reports WHERE run_date =
+  CURRENT_DATE;` then re-run.
+- **Per-broker data isolation still missing.** Multi-broker = Phase 4.5
+  RLS work. Today every signed-in user sees every watchlist row.
+- **`AGENT_NAME` / `AGENT_TITLE` / `FIRM_NAME` / `AGENT_EMAIL` not yet
+  mirrored to Railway env vars.** Local `.env` is correct; until
+  Railway is updated and services redeploy, production drafts still
+  say Michael Hartley.
+
+---
+
+## 10. Phase 7 — Railway production deployment (✅ infra live, sign-in pending)
+
+Goal: get the three-process app onto Railway with all env wired,
+custom domains assigned, OAuth callback registered, and Telegram
+webhook live. Commit chain: `560fdfa` (Phase 5 config), `620ef7c`
+(untracked `data/*.json`), production deploy steps were manual on
+Railway dashboard.
+
+### Architecture in production
+
+```
+┌─────────────────────────────┐   ┌─────────────────────────────┐
+│  web  (Streamlit)           │   │  api  (FastAPI sidecar)     │
+│  web-production-a655b       │   │  api-production-7962b       │
+│  $PORT bound by Railway     │   │  $API_PORT bound (8000)     │
+└──────────────┬──────────────┘   └──────────────┬──────────────┘
+               │                                 │
+               └───────► Supabase ◄──────────────┘
+                          (separate project)
+                                 ▲
+                                 │
+                       ┌─────────┴─────────┐
+                       │  worker (cron)    │
+                       │  no public URL    │
+                       │  $START_SCHEDULER │
+                       └───────────────────┘
+```
+
+### What landed
+
+**Deploy config** (committed in `560fdfa`)
+- [`Procfile`](Procfile) — `web` / `api` / `worker` declarations with
+  Railway-friendly flags (`streamlit --server.headless=true
+  --server.enableCORS=false --server.enableXsrfProtection=false` so
+  Railway's proxy doesn't trip XSRF; `uvicorn ... --port ${API_PORT:-8000}`
+  so the api service is rebindable from env).
+- [`railway.toml`](railway.toml) — nixpacks builder, `on_failure`
+  restart with max 3 retries.
+- [`runtime.txt`](runtime.txt) — `python-3.11.9` pin (matches dev venv).
+- [`requirements.txt`](requirements.txt) — `pip freeze` of 115 pinned
+  entries for reproducible Railway builds.
+- [`.gitignore`](.gitignore) — broadened to `data/*.json` with
+  `!data/.gitkeep` escape so `data/` survives a fresh clone but its
+  JSON contents stay out of git.
+- [`data/.gitkeep`](data/.gitkeep) — pinhole file.
+- [`check_env.py`](check_env.py) — pre-deploy guard; exits non-zero
+  if any required env var is missing.
+- [`DEPLOYMENT.md`](DEPLOYMENT.md) — step-by-step Railway walkthrough.
+
+**Untrack of `data/*.json`** (committed in `620ef7c`)
+- `git rm --cached data/watchlist.json data/tone_profile.json
+  data/dismissed_leads.json data/tone_preferences.json`. Supabase is
+  the authoritative store; the JSONs were just creating noise in
+  `git status` on every local migration.
+
+### State right now
+
+```
+web service       ONLINE      web-production-a655b.up.railway.app
+api service       ONLINE      api-production-7962b.up.railway.app
+worker service    ONLINE      no public URL
+api /health       200 OK      {"status":"ok","database":"connected"}
+streamlit boot    200 OK      ~890ms first byte
+Telegram webhook  NOT YET     setWebhook curl pending
+Google redirect   FIXED       api now sends Railway callback URL
+                              ↳ added to Google Cloud Console too
+```
+
+### What's outstanding before sign-off
+
+1. **Mirror Grey's identity vars on all 3 Railway services**
+   (`AGENT_NAME`, `AGENT_TITLE`, `FIRM_NAME`, `AGENT_EMAIL`). Until
+   then drafts in production keep saying Michael Hartley.
+2. **Regenerate the stale `research_reports.draft` rows.** Either
+   `DELETE FROM research_reports WHERE run_date = CURRENT_DATE;` then
+   trigger a Run-Pipeline, or wait for the next 05:00 ET cron.
+3. **Register the Telegram webhook** against the production api:
+   ```bash
+   curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
+        -d "url=https://api-production-7962b.up.railway.app/telegram/webhook"
+   curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"
+   ```
+4. **Soham + Grey first sign-in** — both need adding as **Test users**
+   on Google OAuth consent screen (Soham works fine; Grey blocked
+   because `Grey.Mccarthy@cushwake.com` is a Microsoft 365 account
+   and Google rejects it as a Test user — needs a personal Gmail).
+5. **UptimeRobot** on `/health` so the worker container stays warm
+   between cron firings.
+
+### Gotchas surfaced during the Railway deploy
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Safari can't connect to `localhost:8000/oauth/login` | `FASTAPI_URL` env var unset on the **web** service — the "Sign in" link built from default `http://localhost:8000` | Set `FASTAPI_URL=https://api-production-7962b.up.railway.app` on web service |
+| Safari can't connect to `localhost:8000/oauth/callback` after Google consent | `GOOGLE_REDIRECT_URI` env var unset on the **api** service — `/oauth/login` sent `redirect_uri=localhost:8000` to Google | Set `GOOGLE_REDIRECT_URI=https://api-production-7962b.up.railway.app/oauth/callback` on api service |
+| `redirect_uri_mismatch` from Google | Production callback URL not registered in OAuth client | Add the Railway URL to **Authorised redirect URIs** in Google Cloud Console (leave localhost in too for local dev) |
+| "Email addresses must be associated with an active Google Account" when adding Grey as Test user | `Grey.Mccarthy@cushwake.com` is Microsoft 365 (C&W) — not a Google identity | Grey signs in with a personal Gmail instead; signature still reads "Cushman & Wakefield" |
+| Draft in dashboard says "Michael Hartley, Hartley CRE Partners" | `AGENT_NAME` / `AGENT_TITLE` / `FIRM_NAME` not set on Railway → falls back to `config.py` defaults | Mirror the four identity env vars on all 3 services, then regenerate the draft row |
+| Streamlit "JavaScript origins" field error in Google Cloud Console | Pasting the full callback URL in the origins field (origins must be host-only) | Leave JavaScript origins empty — origins aren't used by the server-side OAuth code flow |
+
+---
+
+## 11. Debugging notes — quick reference for future-me
+
+### Where to look first
+
+| Symptom | First thing to check |
+|---|---|
+| Pipeline crashed at 05:00 ET | `pipeline_runs` table — `error` column, `status='failed'` row for today |
+| Pipeline ran but no drafts in Gmail | `BROKER_EMAILS` populated? Gmail service auth succeed? `data/error_log.json` `scope=scheduler.gmail_auth` or `scope=scheduler.digest[*]` |
+| Telegram brief missing on phone | `users.telegram_connected=true`? Webhook URL set? Test with `curl .../getWebhookInfo` |
+| Every prospect scoring exactly 20 | `_mock_fallback` fingerprint — scrapers + bart-mnli both empty. `data/error_log.json` `scope=scheduler.no_articles` rows tell you which prospect |
+| Draft signature says Michael Hartley | Either (a) draft row is stale from before commit `439637c`, or (b) Railway env vars missing `AGENT_NAME` / `AGENT_TITLE` / `FIRM_NAME` |
+| LinkedIn 0 jobs across the board | Either (a) the global rate limiter is still cooling from a prior run, or (b) LinkedIn's silent rate limit hit your IP. Check error_log for `scope=linkedin_jobs.scrape`. Retry-with-jitter usually recovers on the next cron firing |
+| `redirect_uri_mismatch` on sign-in | (a) `GOOGLE_REDIRECT_URI` on api service value vs (b) Google Cloud Console "Authorised redirect URIs" — these two must match character-for-character |
+| Streamlit cold-start ~20s on first request | Normal; Railway suspends idle containers. UptimeRobot ping every 5min on `/health` prevents this |
+
+### Useful one-liners
+
+```bash
+# Force-regenerate today's drafts (after identity / prompt change)
+python -c "from database import _db; from datetime import date;
+db=_db(); db.table('research_reports').delete().eq('run_date',
+date.today().isoformat()).execute()"
+python scheduler.py --once
+
+# Inspect what redirect_uri the api is currently sending Google
+curl -s -o /dev/null -D - "$FASTAPI_URL/oauth/login" | grep -i location
+
+# Health check + DB connectivity
+curl -s "$FASTAPI_URL/health"
+
+# Telegram webhook status
+curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"
+
+# All today's reports + LinkedIn signal count per prospect
+python -c "
+from database import get_most_recent_reports
+for r in get_most_recent_reports():
+    li = [s for s in (r['signals'] or [])
+          if 'linkedin' in (s.get('source','') or '').lower()]
+    print(f\"{r['company']:24} score={r['composite_score']:3}\"
+          f\" tier={r['tier']:7} linkedin={len(li)}\")"
+```
+
+### Files where the demo placeholders still live (for forensic edits)
+
+- `config.py` lines ~39-43: `AGENT_NAME`, `AGENT_TITLE`, `FIRM_NAME`,
+  `AGENT_PHONE`, `AGENT_EMAIL` defaults. Any env not set on Railway
+  falls back to these.
+- Prompts that reference identity: `EMAIL_SYSTEM_PROMPT`,
+  `LINKEDIN_SYSTEM_PROMPT`, `FOLLOWUP_SYSTEM_PROMPT` in
+  [`config.py`](config.py).
+- Fallback signature sites: `scheduler.py` `_generate_draft` template
+  path; `hf_models/writer.py` `generate`, `_fallback_email`,
+  `_fallback_linkedin`.
+
+---
+
+## 12. Deferred decisions / next phases
 
 **RLS plan (Phase 4.5, before onboarding the 2nd client).** Every
 tenant-scoped table (`prospects`, `research_reports`, `sent_emails`,
@@ -480,26 +822,24 @@ safe ordering is:
 Doing it any earlier than Phase 2 would have made the app appear empty —
 RLS without authentication = closed policies = nothing readable.
 
-**Phase 5 (next).** Production deployment to Railway / Fly / Render.
-Procfile already declares `web` (Streamlit), `api` (uvicorn) and
-`worker` (scheduler). Outstanding work:
-- Pick a host and provision the three services.
-- Set every env var from `.env.example` on the host (including new
-  Phase-3/4 keys: `SUPABASE_*`, `GOOGLE_*`, `FASTAPI_URL`,
-  `STREAMLIT_URL`, `ALLOWED_EMAILS`, `TELEGRAM_BOT_TOKEN`,
-  `TELEGRAM_BOT_USERNAME`).
-- Update Google OAuth client to add the production
-  `…/oauth/callback` redirect URI.
-- Register the Telegram webhook against the public host:
-  `curl -X POST "https://api.telegram.org/bot$TOKEN/setWebhook" \
-      -d "url=https://<public-api-host>/telegram/webhook"`.
-- UptimeRobot (or similar) pinging `/health` so the worker container
-  stays warm.
+**Microsoft 365 sign-in path.** Grey at `@cushwake.com` cannot complete
+Google OAuth because C&W runs Microsoft 365. For now the workaround is
+"Grey uses a personal Gmail for sign-in; signature still says C&W."
+A proper fix needs MS Graph OAuth alongside Google OAuth and Outlook
+send/draft endpoints alongside the Gmail API calls. Roughly 2-3 days
+of code.
 
-**Beyond Phase 5.** Reply-watcher (call `send_reply_notification` when
-Gmail detects a thread reply), tone-learning loop (mine
-`data/tone_archive.json` weekly to update `data/tone_profile.json`),
-compound-signal scoring trained on the broker's approve/skip history.
+**Reply-watcher.** `telegram_bot.send_reply_notification` is exposed
+but unwired. A daily Gmail thread scan + reply detector would close
+the loop.
+
+**Tone-learning loop.** Weekly job mines `data/tone_archive.json`
+(now in Supabase via `tone_profiles` table) to update the tone
+profile based on broker edits to drafts.
+
+**Compound-signal scoring.** Replace the linear weighted mean with a
+learnt model trained on the broker's approve/skip history. Cold-start
+with the current formula; switch once enough labelled examples exist.
 
 ## 9. Files you can safely delete
 
