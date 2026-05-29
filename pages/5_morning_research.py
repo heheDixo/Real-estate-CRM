@@ -266,6 +266,65 @@ with btn_col:
     st.markdown('</div>', unsafe_allow_html=True)
 
 
+# ── Quick-access toolbar (Calendar · Sheet · Drive) ────────────────────────
+# These three buttons sit immediately under the header so the user can
+# jump to the Google surfaces the pipeline writes into without hunting
+# through the sidebar. Each opens in a new tab.
+
+_user_sheet_id = (_user.get("sheets_spreadsheet_id") or "").strip()
+_qa_sheet_href = (
+    f"https://docs.google.com/spreadsheets/d/{_user_sheet_id}/edit"
+    if _user_sheet_id else ""
+)
+
+# Button stylesheet — neutral surface, accent-coloured icon, hover lift.
+# Sheet button is greyed out (no href, reduced opacity) until the user has
+# sent their first email and the spreadsheet has been auto-created.
+_qa_btn_base = (
+    "display:flex;align-items:center;justify-content:center;gap:10px;"
+    "background:var(--bg-surface);border:1px solid var(--border);"
+    "border-radius:8px;padding:12px 18px;text-decoration:none;"
+    "font-family:var(--font-mono);font-size:11px;font-weight:500;"
+    "letter-spacing:0.14em;text-transform:uppercase;"
+    "color:var(--text-primary);transition:all 0.15s ease;"
+)
+
+_qa_calendar = (
+    f'<a href="https://calendar.google.com/calendar/u/0/r" target="_blank" '
+    f'style="{_qa_btn_base}border-left:3px solid var(--accent-cobalt);">'
+    f'<span style="font-size:15px;">📅</span> Calendar follow-ups'
+    f'</a>'
+)
+_qa_drive = (
+    f'<a href="https://drive.google.com/drive/u/0/recent" target="_blank" '
+    f'style="{_qa_btn_base}border-left:3px solid var(--accent-gold);">'
+    f'<span style="font-size:15px;">📁</span> Research docs · Drive'
+    f'</a>'
+)
+if _qa_sheet_href:
+    _qa_sheet = (
+        f'<a href="{_qa_sheet_href}" target="_blank" '
+        f'style="{_qa_btn_base}border-left:3px solid var(--accent-sage);">'
+        f'<span style="font-size:15px;">📊</span> Sent tracker · Sheet'
+        f'</a>'
+    )
+else:
+    _qa_sheet = (
+        f'<div style="{_qa_btn_base}border-left:3px solid var(--border);'
+        f'opacity:0.45;cursor:not-allowed;">'
+        f'<span style="font-size:15px;">📊</span> Sheet · sends after first email'
+        f'</div>'
+    )
+
+st.markdown(
+    f'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;'
+    f'margin:0 0 18px;">'
+    f'{_qa_calendar}{_qa_drive}{_qa_sheet}'
+    f'</div>',
+    unsafe_allow_html=True,
+)
+
+
 # ── Progress bar + auto-poll while running ──────────────────────────────────
 
 
@@ -600,12 +659,13 @@ with right:
         )
 
     # ── Research doc generator (on-demand) ────────────────────────────────
-    if not getattr(sel, "research_doc_url", ""):
-        st.markdown(
-            '<div style="margin-top:14px;padding-top:14px;'
-            'border-top:1px solid var(--border-faint);"></div>',
-            unsafe_allow_html=True,
-        )
+    st.markdown(
+        '<div style="margin-top:14px;padding-top:14px;'
+        'border-top:1px solid var(--border-faint);"></div>',
+        unsafe_allow_html=True,
+    )
+    _doc_url = getattr(sel, "research_doc_url", "") or ""
+    if not _doc_url:
         if st.button(
             "Generate research doc",
             key=f"gen_doc_{sel.prospect_id}",
@@ -621,8 +681,8 @@ with right:
                 if url:
                     sel.research_doc_url = url
                     _persist_reports(reports)
-                    st.success("Research doc created — refreshing…")
-                    time.sleep(1)
+                    st.success("Research doc created ✓")
+                    time.sleep(0.6)
                     st.rerun()
                 else:
                     st.warning(
@@ -630,6 +690,24 @@ with right:
                         "enabled in your Google Cloud project, then try again. "
                         "Details in `data/error_log.json` under scope `docs.*`."
                     )
+    else:
+        # Prominent "open the doc" button shown in the same slot the
+        # Generate button occupied — so the link is right where the user
+        # last looked. Gold accent matches the Drive / research-docs
+        # quick-link in the header for visual consistency.
+        st.markdown(
+            f'<a href="{_doc_url}" target="_blank" style="display:flex;'
+            f'align-items:center;justify-content:center;gap:10px;'
+            f'background:var(--bg-surface);border:1px solid var(--border);'
+            f'border-left:3px solid var(--accent-gold);border-radius:8px;'
+            f'padding:12px 18px;text-decoration:none;'
+            f'font-family:var(--font-mono);font-size:11.5px;font-weight:500;'
+            f'letter-spacing:0.14em;text-transform:uppercase;'
+            f'color:var(--text-primary);">'
+            f'<span style="font-size:15px;">📄</span> Open research doc ↗'
+            f'</a>',
+            unsafe_allow_html=True,
+        )
 
     # Approve / dismiss for discovered leads
     if sel.source == "discovered" and not sel.approved:
