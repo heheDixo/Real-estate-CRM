@@ -139,7 +139,7 @@ class OutreachWriter:
             body    = body    or (
                 f"{brief}\n\n"
                 f"Worth a short conversation?\n\n"
-                f"{config.AGENT_NAME}\n{config.FIRM_NAME}"
+                f"{config.AGENT_NAME}\n{config.AGENT_TITLE}\n{config.FIRM_NAME}"
             )
 
         return SimpleNamespace(email_subject=subject, email_body=body)
@@ -519,6 +519,7 @@ class OutreachWriter:
             f"{opening}\n\n"
             f"{middle} {closing}\n\n"
             f"{config.AGENT_NAME}\n"
+            f"{config.AGENT_TITLE}\n"
             f"{config.FIRM_NAME}"
         )
 
@@ -559,6 +560,7 @@ class OutreachWriter:
             f"in the last 30 days.\n\n"
             f"Happy to share what I'm seeing if useful.\n\n"
             f"{config.AGENT_NAME}\n"
+            f"{config.AGENT_TITLE}\n"
             f"{config.FIRM_NAME}"
         )
         return subject, body

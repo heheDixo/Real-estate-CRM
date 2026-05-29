@@ -324,7 +324,7 @@ def _generate_draft(report, prospect: Dict,
                 f"Hi {syn.contact_first_name},\n\n"
                 f"{report.top_hook}\n\n"
                 f"Worth a short conversation, even if only to put a marker down?\n\n"
-                f"{config.AGENT_NAME}\n{config.FIRM_NAME}"
+                f"{config.AGENT_NAME}\n{config.AGENT_TITLE}\n{config.FIRM_NAME}"
             )
 
     # LinkedIn variant — re-use the writer
