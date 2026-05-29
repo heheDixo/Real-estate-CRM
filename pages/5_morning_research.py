@@ -296,9 +296,9 @@ _qa_calendar = (
     f'</a>'
 )
 _qa_drive = (
-    f'<a href="https://drive.google.com/drive/u/0/recent" target="_blank" '
+    f'<a href="https://docs.google.com/document/u/0/" target="_blank" '
     f'style="{_qa_btn_base}border-left:3px solid var(--accent-gold);">'
-    f'<span style="font-size:15px;">📁</span> Research docs · Drive'
+    f'<span style="font-size:15px;">📄</span> Research docs · Google Docs'
     f'</a>'
 )
 if _qa_sheet_href:

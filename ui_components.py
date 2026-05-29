@@ -297,8 +297,8 @@ def render_sidebar() -> None:
         st.markdown(
             f'<a href="https://calendar.google.com/calendar/u/0/r" '
             f'target="_blank" style="{_link_style}">📅 Calendar follow-ups ↗</a>'
-            f'<a href="https://drive.google.com/drive/u/0/recent" '
-            f'target="_blank" style="{_link_style}">📁 Research docs (Drive) ↗</a>'
+            f'<a href="https://docs.google.com/document/u/0/" '
+            f'target="_blank" style="{_link_style}">📄 Research docs (Google Docs) ↗</a>'
             + (
                 f'<a href="https://docs.google.com/spreadsheets/d/{_sheet_id}/edit" '
                 f'target="_blank" style="{_link_style}">📊 Sent tracker ↗</a>'
