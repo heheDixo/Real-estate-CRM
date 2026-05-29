@@ -329,12 +329,15 @@ if not reports:
 sent_today_pairs: set = set()    # {(company_lower, email_lower)}
 sent_today_companies: set = set()  # {company_lower}
 try:
-    if config.SHEETS_SPREADSHEET_ID and _creds is not None:
-        from google_sheets import authenticate_sheets, get_all_sent_emails
+    from google_sheets import (
+        authenticate_sheets, get_all_sent_emails, get_user_sheet_id,
+    )
+    _sid = get_user_sheet_id(_user)
+    if _sid and _creds is not None:
         svc = authenticate_sheets(credentials=_creds)
         today_iso = datetime.date.today().isoformat()
         if svc:
-            for row in get_all_sent_emails(svc, config.SHEETS_SPREADSHEET_ID):
+            for row in get_all_sent_emails(svc, _sid):
                 date_field = (row.get("Date Sent") or "")[:10]
                 if date_field != today_iso:
                     continue

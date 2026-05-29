@@ -82,6 +82,73 @@ def authenticate_sheets(credentials=None, user_id=None):
         return None
 
 
+# ── Per-user sheet helpers ──────────────────────────────────────────────────
+
+
+DEFAULT_USER_SHEET_TITLE = "CRE Outreach — Sent Emails"
+
+
+def get_user_sheet_id(user: Optional[Dict]) -> str:
+    """
+    Return the spreadsheet ID stored on this user's Supabase row, or "" if
+    they don't have one yet. Read-only — does NOT create a sheet. Use this
+    on the read paths (sent-tracker, morning-research sent-today lookup,
+    follow-ups status updates) so first-time users see an empty state
+    instead of paying the cost of creating a sheet they may never write to.
+    """
+    if not user:
+        return ""
+    return (user.get("sheets_spreadsheet_id") or "").strip()
+
+
+def ensure_user_sheet(service, user: Dict,
+                      title: str = DEFAULT_USER_SHEET_TITLE) -> str:
+    """
+    Return the user's own spreadsheet ID — lazily creating a new spreadsheet
+    in their own Google Drive on first call and persisting the ID back to
+    Supabase + the in-memory session_state user dict.
+
+    Use this on the *write* paths (Send now, Save to Gmail draft). On every
+    subsequent send the persisted ID is reused with no API round-trip.
+    """
+    if not user or service is None:
+        return ""
+
+    existing = (user.get("sheets_spreadsheet_id") or "").strip()
+    if existing:
+        return existing
+
+    try:
+        created = service.spreadsheets().create(
+            body={"properties": {"title": title}},
+            fields="spreadsheetId",
+        ).execute()
+    except Exception as exc:
+        _log_error("sheets.ensure_user_sheet.create", exc)
+        return ""
+
+    sid = (created.get("spreadsheetId") or "").strip()
+    if not sid:
+        return ""
+
+    try:
+        from database import update_user
+        update_user(user["id"], {"sheets_spreadsheet_id": sid})
+    except Exception as exc:
+        _log_error("sheets.ensure_user_sheet.persist", exc)
+
+    user["sheets_spreadsheet_id"] = sid
+    try:
+        import streamlit as st
+        cu = st.session_state.get("current_user")
+        if cu and cu.get("id") == user.get("id"):
+            cu["sheets_spreadsheet_id"] = sid
+    except Exception:
+        pass
+
+    return sid
+
+
 # ── Sheet helpers ───────────────────────────────────────────────────────────
 
 

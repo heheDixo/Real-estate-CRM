@@ -153,13 +153,17 @@ for ev in events:
                          key=f"replied_{ev['event_id']}",
                          use_container_width=True):
                 try:
-                    from google_sheets   import authenticate_sheets, update_email_status
+                    from google_sheets   import (
+                        authenticate_sheets, update_email_status,
+                        get_user_sheet_id,
+                    )
                     from google_calendar import authenticate_calendar, delete_event
-                    ssvc = authenticate_sheets(credentials=_creds)
-                    csvc = authenticate_calendar(credentials=_creds)
-                    if ssvc and config.SHEETS_SPREADSHEET_ID:
+                    ssvc  = authenticate_sheets(credentials=_creds)
+                    csvc  = authenticate_calendar(credentials=_creds)
+                    _sid  = get_user_sheet_id(_user)
+                    if ssvc and _sid:
                         update_email_status(
-                            ssvc, config.SHEETS_SPREADSHEET_ID,
+                            ssvc, _sid,
                             contact_email=title.split("·")[-1].strip(),
                             status="Replied",
                         )

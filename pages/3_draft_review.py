@@ -321,33 +321,38 @@ with draft_col:
                             "draft_url": info.get("url", ""),
                         })
                         _persist_lead(lead)
-                        # log a Draft row to Sheets if configured
-                        if config.SHEETS_SPREADSHEET_ID:
+                        # Log a Draft row to *this user's* sheet — lazily
+                        # created in their Drive on first call so each user
+                        # owns their own sent-tracker spreadsheet.
+                        if _user:
                             try:
                                 from google_sheets import (
-                                    authenticate_sheets, log_sent_email,
+                                    authenticate_sheets, ensure_user_sheet,
+                                    log_sent_email,
                                 )
                                 ssvc = authenticate_sheets(credentials=_creds)
                                 if ssvc:
-                                    log_sent_email(
-                                        ssvc, config.SHEETS_SPREADSHEET_ID, {
-                                            "Date Sent":     datetime.date.today().isoformat(),
-                                            "Company":       lead.company,
-                                            "Contact Name":  lead.contact_name,
-                                            "Contact Title": lead.contact_title,
-                                            "Contact Email": lead.contact_email,
-                                            "LinkedIn URL":  lead.linkedin_url,
-                                            "Email Subject": subject,
-                                            "Email Body":    body,
-                                            "Research Signals": json.dumps(
-                                                [s.title for s in lead.signals]
-                                            ),
-                                            "Score":         lead.composite_score,
-                                            "Tier":          lead.tier,
-                                            "Source":        f"page_3 ({variant_choice})",
-                                            "Status":        "Draft",
-                                        },
-                                    )
+                                    sid = ensure_user_sheet(ssvc, _user)
+                                    if sid:
+                                        log_sent_email(
+                                            ssvc, sid, {
+                                                "Date Sent":     datetime.date.today().isoformat(),
+                                                "Company":       lead.company,
+                                                "Contact Name":  lead.contact_name,
+                                                "Contact Title": lead.contact_title,
+                                                "Contact Email": lead.contact_email,
+                                                "LinkedIn URL":  lead.linkedin_url,
+                                                "Email Subject": subject,
+                                                "Email Body":    body,
+                                                "Research Signals": json.dumps(
+                                                    [s.title for s in lead.signals]
+                                                ),
+                                                "Score":         lead.composite_score,
+                                                "Tier":          lead.tier,
+                                                "Source":        f"page_3 ({variant_choice})",
+                                                "Status":        "Draft",
+                                            },
+                                        )
                             except Exception:
                                 pass
                         st.success("Draft created in Gmail ✓")
@@ -424,35 +429,39 @@ with draft_col:
                         f"{datetime.datetime.now().strftime('%H:%M:%S')} "
                         f"from your Gmail"
                     )
-                    # Sheets log
-                    if config.SHEETS_SPREADSHEET_ID:
+                    # Sheets log — into *this user's* own sheet (created
+                    # lazily on first send).
+                    if _user:
                         try:
                             from google_sheets import (
-                                authenticate_sheets, log_sent_email,
+                                authenticate_sheets, ensure_user_sheet,
+                                log_sent_email,
                             )
                             ssvc = authenticate_sheets(credentials=_creds)
                             if ssvc:
-                                log_sent_email(
-                                    ssvc, config.SHEETS_SPREADSHEET_ID, {
-                                        "Date Sent":     datetime.date.today().isoformat(),
-                                        "Company":       lead.company,
-                                        "Contact Name":  lead.contact_name,
-                                        "Contact Title": lead.contact_title,
-                                        "Contact Email": lead.contact_email,
-                                        "LinkedIn URL":  lead.linkedin_url,
-                                        "Email Subject": subject,
-                                        "Email Body":    body,
-                                        "Research Signals": json.dumps(
-                                            [s.title for s in lead.signals]
-                                        ),
-                                        "Score":         lead.composite_score,
-                                        "Tier":          lead.tier,
-                                        "Source":        f"page_3 ({variant_choice})",
-                                        "Status":        "Sent",
-                                        "Hunter Status": verify_result.get("status", ""),
-                                        "Hunter Score":  verify_result.get("score", ""),
-                                    },
-                                )
+                                sid = ensure_user_sheet(ssvc, _user)
+                                if sid:
+                                    log_sent_email(
+                                        ssvc, sid, {
+                                            "Date Sent":     datetime.date.today().isoformat(),
+                                            "Company":       lead.company,
+                                            "Contact Name":  lead.contact_name,
+                                            "Contact Title": lead.contact_title,
+                                            "Contact Email": lead.contact_email,
+                                            "LinkedIn URL":  lead.linkedin_url,
+                                            "Email Subject": subject,
+                                            "Email Body":    body,
+                                            "Research Signals": json.dumps(
+                                                [s.title for s in lead.signals]
+                                            ),
+                                            "Score":         lead.composite_score,
+                                            "Tier":          lead.tier,
+                                            "Source":        f"page_3 ({variant_choice})",
+                                            "Status":        "Sent",
+                                            "Hunter Status": verify_result.get("status", ""),
+                                            "Hunter Score":  verify_result.get("score", ""),
+                                        },
+                                    )
                         except Exception:
                             pass
                     # Calendar follow-up — gate on OAuth credentials, NOT

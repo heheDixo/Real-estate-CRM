@@ -54,15 +54,18 @@ def _fetch_rows() -> List[Dict]:
             return [_db_row_to_ui(r) for r in db_rows]
     except Exception as exc:
         st.warning(f"Database fetch failed: {exc}")
-    # Sheets fallback
-    if not config.SHEETS_SPREADSHEET_ID:
-        return []
+    # Sheets fallback — read from *this user's* own spreadsheet.
     try:
-        from google_sheets import authenticate_sheets, get_all_sent_emails
+        from google_sheets import (
+            authenticate_sheets, get_all_sent_emails, get_user_sheet_id,
+        )
+        sid = get_user_sheet_id(_user)
+        if not sid:
+            return []
         svc = authenticate_sheets(credentials=_creds)
         if svc is None:
             return []
-        return get_all_sent_emails(svc, config.SHEETS_SPREADSHEET_ID)
+        return get_all_sent_emails(svc, sid)
     except Exception as exc:
         st.warning(f"Could not fetch Sheets data: {exc}")
         return []
@@ -98,13 +101,8 @@ if _creds is None:
     )
     st.stop()
 
-if not config.SHEETS_SPREADSHEET_ID:
-    empty_state(
-        "📊",
-        "Spreadsheet ID not set",
-        "Set SHEETS_SPREADSHEET_ID in .env to your spreadsheet ID.",
-    )
-    st.stop()
+# Per-user sheet is created lazily on first Send-now — until then the
+# tracker is empty (which is correct: nothing has been sent yet).
 
 
 rows = _fetch_rows()
@@ -192,8 +190,11 @@ st.markdown(
 
 
 st.markdown('<div style="margin-top:14px;"></div>', unsafe_allow_html=True)
-sheet_url = (
-    f"https://docs.google.com/spreadsheets/d/"
-    f"{config.SHEETS_SPREADSHEET_ID}/edit"
-)
-st.link_button("Open Google Sheet ↗", sheet_url, use_container_width=False)
+from google_sheets import get_user_sheet_id
+_user_sid = get_user_sheet_id(_user)
+if _user_sid:
+    sheet_url = (
+        f"https://docs.google.com/spreadsheets/d/"
+        f"{_user_sid}/edit"
+    )
+    st.link_button("Open Google Sheet ↗", sheet_url, use_container_width=False)
