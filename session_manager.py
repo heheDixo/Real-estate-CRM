@@ -28,6 +28,10 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/calendar",
+    # Docs + Drive scopes — must match oauth_server.GOOGLE_SCOPES so the
+    # token rebuilt here can hit docs.googleapis.com without 403'ing.
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/drive.file",
 ]
 
 

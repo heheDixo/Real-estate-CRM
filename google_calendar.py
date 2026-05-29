@@ -39,13 +39,14 @@ def _log_error(scope: str, exc: Exception) -> None:
 # ── Auth ────────────────────────────────────────────────────────────────────
 
 
-def authenticate_calendar(credentials=None):
+def authenticate_calendar(credentials=None, user_id=None):
     """
     Build and return an authenticated Calendar API service.
 
     If `credentials` is passed (from a logged-in Streamlit user), use them
-    directly. Otherwise (scheduler / background job), load the first user's
-    token from Supabase via google_auth_loader.
+    directly. Otherwise (scheduler / background job), load the token for
+    `user_id` (or the env-pinned primary broker) from Supabase via
+    google_auth_loader.
     """
     try:
         from googleapiclient.discovery import build
@@ -55,7 +56,7 @@ def authenticate_calendar(credentials=None):
 
     if credentials is None:
         from google_auth_loader import load_user_credentials_from_db
-        credentials = load_user_credentials_from_db(SCOPES)
+        credentials = load_user_credentials_from_db(SCOPES, user_id=user_id)
         if credentials is None:
             _log_error("calendar.no_credentials",
                        RuntimeError("No Google token in Supabase — sign in first"))

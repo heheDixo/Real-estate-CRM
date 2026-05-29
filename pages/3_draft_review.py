@@ -8,16 +8,14 @@ set by pages/5_morning_research.py on the "Start outreach" click.
 import datetime
 import json
 import os
-import smtplib
-import ssl
 import time as _time
-from email.mime.text import MIMEText
 
 import streamlit as st
 
 import config
 import database
 from research_agent import ResearchReport, load_morning_run, save_morning_run
+from session_manager import get_google_credentials
 from ui_components import (
     page_shell,
     section_header,
@@ -27,6 +25,14 @@ from ui_components import (
 
 
 page_shell("Draft")
+
+# Logged-in user (set by require_login → page_shell). Every Google call on
+# this page MUST use these credentials so the action lands in *this* user's
+# Gmail / Sheets / Calendar — not whoever happens to be row 1 in the users
+# table. See google_auth_loader.load_user_credentials_from_db for the
+# legacy "first user wins" fallback this avoids.
+_user  = st.session_state.get("current_user") or {}
+_creds = get_google_credentials(_user) if _user else None
 
 
 # ── Load + guard ────────────────────────────────────────────────────────────
@@ -297,7 +303,7 @@ with draft_col:
                      disabled=not lead.contact_email):
             try:
                 from gmail_drafts import authenticate_gmail, create_draft
-                svc = authenticate_gmail()
+                svc = authenticate_gmail(credentials=_creds)
                 if svc is None:
                     st.error("Gmail auth failed — see data/error_log.json")
                 else:
@@ -321,7 +327,7 @@ with draft_col:
                                 from google_sheets import (
                                     authenticate_sheets, log_sent_email,
                                 )
-                                ssvc = authenticate_sheets()
+                                ssvc = authenticate_sheets(credentials=_creds)
                                 if ssvc:
                                     log_sent_email(
                                         ssvc, config.SHEETS_SPREADSHEET_ID, {
@@ -357,10 +363,10 @@ with draft_col:
         if st.button("🚀 Send now", type="primary",
                      use_container_width=True, key="send_btn",
                      disabled=not lead.contact_email):
-            if not config.GMAIL_AVAILABLE:
+            if _creds is None:
                 st.error(
-                    "Gmail SMTP not configured. Set GMAIL_ADDRESS and "
-                    "GMAIL_APP_PASSWORD in .env."
+                    "Google sign-in required to send. Sign out and sign in "
+                    "with Google to authorise Gmail send for your account."
                 )
             else:
                 # Pre-send Hunter verification — block on hard fails so the
@@ -391,20 +397,32 @@ with draft_col:
                 st.session_state.pop("confirm_bad_email", None)
 
                 try:
-                    msg = MIMEText(body, "plain")
-                    msg["From"]    = config.GMAIL_ADDRESS
-                    msg["To"]      = lead.contact_email
-                    msg["Subject"] = subject
-                    with smtplib.SMTP_SSL(
-                        "smtp.gmail.com", 465,
-                        context=ssl.create_default_context(),
-                    ) as smtp:
-                        smtp.login(config.GMAIL_ADDRESS,
-                                    config.GMAIL_APP_PASSWORD)
-                        smtp.send_message(msg)
+                    # Send via the Gmail API using the *logged-in* user's
+                    # credentials. The previous SMTP path used a shared
+                    # GMAIL_APP_PASSWORD env var, so every web user's sends
+                    # left from the primary broker's mailbox — that's the
+                    # exact bug this page-rewrite fixes.
+                    from gmail_drafts import authenticate_gmail, send_email_now
+                    gmail_svc = authenticate_gmail(credentials=_creds)
+                    if gmail_svc is None:
+                        st.error(
+                            "Gmail auth failed for your account — "
+                            "see data/error_log.json"
+                        )
+                        st.stop()
+                    send_result = send_email_now(
+                        gmail_svc, lead.contact_email, subject, body,
+                    )
+                    if not send_result.get("sent"):
+                        st.error(
+                            "Gmail send failed — see data/error_log.json "
+                            "under scope gmail.send_now"
+                        )
+                        st.stop()
                     st.success(
                         f"Sent to {lead.contact_email} at "
-                        f"{datetime.datetime.now().strftime('%H:%M:%S')}"
+                        f"{datetime.datetime.now().strftime('%H:%M:%S')} "
+                        f"from your Gmail"
                     )
                     # Sheets log
                     if config.SHEETS_SPREADSHEET_ID:
@@ -412,7 +430,7 @@ with draft_col:
                             from google_sheets import (
                                 authenticate_sheets, log_sent_email,
                             )
-                            ssvc = authenticate_sheets()
+                            ssvc = authenticate_sheets(credentials=_creds)
                             if ssvc:
                                 log_sent_email(
                                     ssvc, config.SHEETS_SPREADSHEET_ID, {
@@ -443,7 +461,7 @@ with draft_col:
                             from google_calendar import (
                                 authenticate_calendar, create_followup_event,
                             )
-                            csvc = authenticate_calendar()
+                            csvc = authenticate_calendar(credentials=_creds)
                             if csvc:
                                 first = (lead.contact_name or "").split(" ")[0] or "Contact"
                                 last  = " ".join((lead.contact_name or "").split(" ")[1:]) or ""

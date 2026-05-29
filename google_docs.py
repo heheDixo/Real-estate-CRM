@@ -63,12 +63,13 @@ def _log(scope: str, exc) -> None:
 # ── Auth ────────────────────────────────────────────────────────────────────
 
 
-def authenticate_docs(credentials=None):
+def authenticate_docs(credentials=None, user_id=None):
     """Return (docs_service, drive_service) tuple, or (None, None) on failure.
 
     If `credentials` is passed (from a logged-in Streamlit user), use them
-    directly. Otherwise (scheduler / background job), load the first user's
-    token from Supabase via google_auth_loader.
+    directly. Otherwise (scheduler / background job), load the token for
+    `user_id` (or the env-pinned primary broker) from Supabase via
+    google_auth_loader.
     """
     try:
         from googleapiclient.discovery import build
@@ -78,7 +79,7 @@ def authenticate_docs(credentials=None):
 
     if credentials is None:
         from google_auth_loader import load_user_credentials_from_db
-        credentials = load_user_credentials_from_db(SCOPES)
+        credentials = load_user_credentials_from_db(SCOPES, user_id=user_id)
         if credentials is None:
             _log("docs.auth.no_credentials",
                  RuntimeError("No Google token in Supabase — sign in first"))
@@ -253,7 +254,8 @@ _STYLE_MAP = {
 }
 
 
-def create_research_doc(report, folder_id: str = "") -> str:
+def create_research_doc(report, folder_id: str = "",
+                          credentials=None, user_id: str = "") -> str:
     """
     Create a research doc for *report* and return its public URL.
 
@@ -261,8 +263,12 @@ def create_research_doc(report, folder_id: str = "") -> str:
     the caller. Failures are logged to data/error_log.json.
 
     If folder_id is provided, the doc is moved into that Drive folder.
+    When called from a Streamlit page, pass the logged-in user's
+    `credentials` so the doc lands in that user's Drive — not whichever
+    Google account happens to be row-1 in the users table.
     """
-    docs, drive = authenticate_docs()
+    docs, drive = authenticate_docs(credentials=credentials,
+                                    user_id=user_id or None)
     if docs is None:
         return ""
 

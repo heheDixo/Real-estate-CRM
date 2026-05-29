@@ -60,6 +60,12 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/calendar",
+    # Required by the "Generate research doc" button on page 5 and the
+    # scheduler's per-prospect dossier creation. Without these scopes on
+    # the token, docs.documents().create() returns
+    # ACCESS_TOKEN_SCOPE_INSUFFICIENT.
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/drive.file",
 ]
 
 

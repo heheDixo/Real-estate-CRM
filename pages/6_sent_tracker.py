@@ -10,6 +10,7 @@ import streamlit as st
 
 import config
 import database
+from session_manager import get_google_credentials
 from ui_components import (
     page_shell,
     metric_card,
@@ -19,6 +20,11 @@ from ui_components import (
 
 
 page_shell("Sent Tracker")
+
+# Logged-in user credentials — ensure the Sheets read is scoped to the
+# signed-in user's drive, not the row-1 fallback.
+_user  = st.session_state.get("current_user") or {}
+_creds = get_google_credentials(_user) if _user else None
 
 
 def _db_row_to_ui(r: Dict) -> Dict:
@@ -53,7 +59,7 @@ def _fetch_rows() -> List[Dict]:
         return []
     try:
         from google_sheets import authenticate_sheets, get_all_sent_emails
-        svc = authenticate_sheets()
+        svc = authenticate_sheets(credentials=_creds)
         if svc is None:
             return []
         return get_all_sent_emails(svc, config.SHEETS_SPREADSHEET_ID)

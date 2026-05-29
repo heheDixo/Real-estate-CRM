@@ -59,13 +59,14 @@ def _log_error(scope: str, exc: Exception) -> None:
 # ── Auth ────────────────────────────────────────────────────────────────────
 
 
-def authenticate_gmail(credentials=None):
+def authenticate_gmail(credentials=None, user_id=None):
     """
     Build and return an authenticated Gmail API service.
 
     If `credentials` is passed (from a logged-in Streamlit user), use them
-    directly. Otherwise (scheduler / background job), load the first user's
-    token from Supabase via google_auth_loader.
+    directly. Otherwise (scheduler / background job), load the token for
+    `user_id` (or the env-pinned primary broker, or row-1) from Supabase
+    via google_auth_loader.
 
     Returns None (and logs) if no credentials can be sourced or the OAuth
     library is not installed.
@@ -78,7 +79,7 @@ def authenticate_gmail(credentials=None):
 
     if credentials is None:
         from google_auth_loader import load_user_credentials_from_db
-        credentials = load_user_credentials_from_db(SCOPES)
+        credentials = load_user_credentials_from_db(SCOPES, user_id=user_id)
         if credentials is None:
             _log_error("gmail.no_credentials",
                        RuntimeError("No Google token in Supabase — sign in first"))
@@ -99,7 +100,15 @@ def _build_message(to_email: str, subject: str, body: str,
                     sender: str = "me") -> Dict:
     msg = MIMEText(body, "plain")
     msg["to"]      = to_email
-    msg["from"]    = sender
+    # Only set the From header explicitly when the caller passed a real
+    # address. The Gmail API treats `userId="me"` as the authenticated
+    # user; if we set From to a *different* address (the env-var sender)
+    # the message gets sent from that other account, which is exactly
+    # the bug where every web user's drafts/sends went out of the
+    # primary broker's mailbox. Default sender stays "me" so the API
+    # picks up whoever owns the credential.
+    if sender and sender != "me":
+        msg["from"] = sender
     msg["subject"] = subject
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     return {"raw": raw}
@@ -121,8 +130,11 @@ def create_draft(service, to_email: str, subject: str, body: str,
     except ImportError:
         return {}
 
-    message = _build_message(to_email, subject, body,
-                              sender=config.GMAIL_SENDER or "me")
+    # sender="me" so the draft is created in the *authenticated* user's
+    # mailbox. Using config.GMAIL_SENDER here forced the From header to a
+    # single env-var address, which is why every web user's drafts ended
+    # up in the primary broker's Drafts folder.
+    message = _build_message(to_email, subject, body, sender="me")
 
     try:
         draft = service.users().drafts().create(
@@ -143,6 +155,35 @@ def create_draft(service, to_email: str, subject: str, body: str,
         "url":      url,
         "prospect_name": prospect_name,
     }
+
+
+def send_email_now(service, to_email: str, subject: str, body: str) -> Dict:
+    """
+    Send an email immediately as the authenticated Gmail user.
+
+    Used by the "Send now" button on the draft-review page so the message
+    goes out of the logged-in user's mailbox (not whichever Gmail SMTP
+    app-password sits in the .env file).
+
+    Returns:
+        {"sent": bool, "message_id": str, "thread_id": str}.
+    """
+    if service is None or not to_email:
+        return {"sent": False, "message_id": "", "thread_id": ""}
+
+    message = _build_message(to_email, subject, body, sender="me")
+    try:
+        sent = service.users().messages().send(
+            userId="me", body=message,
+        ).execute()
+        return {
+            "sent":       True,
+            "message_id": sent.get("id", ""),
+            "thread_id":  sent.get("threadId", ""),
+        }
+    except Exception as exc:
+        _log_error("gmail.send_now", exc)
+        return {"sent": False, "message_id": "", "thread_id": ""}
 
 
 def send_morning_digest(service, broker_email: str,
@@ -212,8 +253,7 @@ def send_morning_digest(service, broker_email: str,
     lines.append(f"— {config.AGENT_NAME}'s research agent")
 
     body = "\n".join(lines)
-    message = _build_message(broker_email, subject, body,
-                              sender=config.GMAIL_SENDER or "me")
+    message = _build_message(broker_email, subject, body, sender="me")
 
     try:
         sent = service.users().messages().send(

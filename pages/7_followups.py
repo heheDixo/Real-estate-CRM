@@ -8,17 +8,23 @@ import os
 import streamlit as st
 
 import config
+from session_manager import get_google_credentials
 from ui_components import page_shell, empty_state
 
 
 page_shell("Follow-ups")
+
+# Logged-in user credentials — calendar + sheets actions on this page must
+# hit the signed-in user's data, not the row-1 fallback.
+_user  = st.session_state.get("current_user") or {}
+_creds = get_google_credentials(_user) if _user else None
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _fetch_events():
     try:
         from google_calendar import authenticate_calendar, get_upcoming_followups
-        svc = authenticate_calendar()
+        svc = authenticate_calendar(credentials=_creds)
         if svc is None:
             return None
         return get_upcoming_followups(
@@ -149,8 +155,8 @@ for ev in events:
                 try:
                     from google_sheets   import authenticate_sheets, update_email_status
                     from google_calendar import authenticate_calendar, delete_event
-                    ssvc = authenticate_sheets()
-                    csvc = authenticate_calendar()
+                    ssvc = authenticate_sheets(credentials=_creds)
+                    csvc = authenticate_calendar(credentials=_creds)
                     if ssvc and config.SHEETS_SPREADSHEET_ID:
                         update_email_status(
                             ssvc, config.SHEETS_SPREADSHEET_ID,
@@ -170,7 +176,7 @@ for ev in events:
                          use_container_width=True):
                 try:
                     from google_calendar import authenticate_calendar, delete_event
-                    csvc = authenticate_calendar()
+                    csvc = authenticate_calendar(credentials=_creds)
                     if csvc and delete_event(csvc, config.CALENDAR_ID, ev["event_id"]):
                         _fetch_events.clear()
                         st.success("Deleted")

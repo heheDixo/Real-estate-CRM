@@ -13,11 +13,23 @@ import os
 from typing import Optional
 
 
-def load_user_credentials_from_db(default_scopes: list):
+def load_user_credentials_from_db(default_scopes: list, user_id: Optional[str] = None):
     """
-    Pull the first user's google_token from Supabase, refresh if expired,
-    persist the refreshed token, and return a google.oauth2.Credentials
-    instance — or None if no user / no refresh_token / any failure.
+    Load a user's google_token from Supabase, refresh if expired, persist
+    the refreshed token, and return a google.oauth2.Credentials instance —
+    or None if the user can't be found / no refresh_token / any failure.
+
+    Resolution order for which user's token to load:
+      1. Explicit ``user_id`` argument (always wins — used by UI pages).
+      2. ``PRIMARY_USER_ID`` env var (scheduler / cron pinning).
+      3. ``PRIMARY_BROKER_EMAIL`` / ``BROKER_EMAIL`` env var lookup against
+         ``users.google_email`` (scheduler fallback by email).
+      4. The first row in ``users`` (legacy behaviour — only kicks in when
+         no other resolution is set and only one user exists).
+
+    The point: never silently fall through to row-1 when the UI is the caller
+    — that's the bug that routed every web user's Gmail/Drafts/Sheets/Calendar
+    actions through whichever account happened to sign in first.
     """
     try:
         from google.oauth2.credentials import Credentials
@@ -37,10 +49,41 @@ def load_user_credentials_from_db(default_scopes: list):
         return None
 
     try:
-        result = db.table("users").select("id, google_token").limit(1).execute()
-        if not result.data:
+        row = None
+
+        if user_id:
+            res = (db.table("users")
+                     .select("id, google_token")
+                     .eq("id", user_id).limit(1).execute())
+            row = res.data[0] if res.data else None
+
+        if row is None:
+            env_uid = os.getenv("PRIMARY_USER_ID", "").strip()
+            if env_uid:
+                res = (db.table("users")
+                         .select("id, google_token")
+                         .eq("id", env_uid).limit(1).execute())
+                row = res.data[0] if res.data else None
+
+        if row is None:
+            env_email = (
+                os.getenv("PRIMARY_BROKER_EMAIL", "").strip()
+                or os.getenv("BROKER_EMAIL", "").strip()
+            )
+            if env_email:
+                res = (db.table("users")
+                         .select("id, google_token")
+                         .eq("google_email", env_email).limit(1).execute())
+                row = res.data[0] if res.data else None
+
+        if row is None:
+            res = (db.table("users")
+                     .select("id, google_token")
+                     .limit(1).execute())
+            row = res.data[0] if res.data else None
+
+        if row is None:
             return None
-        row        = result.data[0]
         token_data = row.get("google_token") or {}
         if not token_data.get("refresh_token"):
             return None

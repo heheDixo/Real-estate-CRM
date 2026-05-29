@@ -36,6 +36,7 @@ from research_agent import (
     load_discovered_leads,
     save_morning_run,
 )
+from session_manager import get_google_credentials
 
 
 _REPORT_FIELDS = {
@@ -84,6 +85,10 @@ page_shell("Research")
 # ── Telegram connect banner (Phase 4) ───────────────────────────────────────
 # page_shell() already ran require_login(); the user dict is in session_state.
 _user = st.session_state.get("current_user") or {}
+# Credentials of the logged-in user — every Google call on this page must
+# use these, otherwise the action lands in row-1's account (the legacy
+# fallback in google_auth_loader). That's the multi-tenant bug fix.
+_creds = get_google_credentials(_user) if _user else None
 if _user.get("id") and not _user.get("telegram_connected"):
     from telegram_bot import get_connect_url
     _connect_url = get_connect_url(_user["id"])
@@ -326,7 +331,7 @@ sent_today_companies: set = set()  # {company_lower}
 try:
     if config.SHEETS_SPREADSHEET_ID and os.path.exists(config.GOOGLE_CREDENTIALS_PATH):
         from google_sheets import authenticate_sheets, get_all_sent_emails
-        svc = authenticate_sheets()
+        svc = authenticate_sheets(credentials=_creds)
         today_iso = datetime.date.today().isoformat()
         if svc:
             for row in get_all_sent_emails(svc, config.SHEETS_SPREADSHEET_ID):
@@ -606,7 +611,7 @@ with right:
             with st.spinner("Composing dossier in Google Docs…"):
                 try:
                     from google_docs import create_research_doc
-                    url = create_research_doc(sel)
+                    url = create_research_doc(sel, credentials=_creds)
                 except Exception as exc:
                     st.error(f"Doc creation failed: {type(exc).__name__}: {exc}")
                     url = ""
