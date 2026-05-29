@@ -58,11 +58,11 @@ st.markdown('<div style="margin:14px 0;"></div>', unsafe_allow_html=True)
 # ── Guards ──────────────────────────────────────────────────────────────────
 
 
-if not os.path.exists(config.GOOGLE_CREDENTIALS_PATH):
+if _creds is None:
     empty_state(
         "📅",
         "Google Calendar not connected",
-        "Drop credentials.json in the project root and set CALENDAR_ID=primary in .env.",
+        "Sign out and sign back in with Google to authorise Calendar access.",
     )
     st.stop()
 

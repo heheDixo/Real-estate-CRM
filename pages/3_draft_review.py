@@ -455,8 +455,13 @@ with draft_col:
                                 )
                         except Exception:
                             pass
-                    # Calendar follow-up
-                    if os.path.exists(config.GOOGLE_CREDENTIALS_PATH):
+                    # Calendar follow-up — gate on OAuth credentials, NOT
+                    # on the local credentials.json file. The previous
+                    # os.path.exists check meant calendar events only fired
+                    # for the developer who happened to have the file on
+                    # disk; on Railway and for every other web user the
+                    # guard was False and the block was silently skipped.
+                    if _creds is not None:
                         try:
                             from google_calendar import (
                                 authenticate_calendar, create_followup_event,

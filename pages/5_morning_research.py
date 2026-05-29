@@ -329,7 +329,7 @@ if not reports:
 sent_today_pairs: set = set()    # {(company_lower, email_lower)}
 sent_today_companies: set = set()  # {company_lower}
 try:
-    if config.SHEETS_SPREADSHEET_ID and os.path.exists(config.GOOGLE_CREDENTIALS_PATH):
+    if config.SHEETS_SPREADSHEET_ID and _creds is not None:
         from google_sheets import authenticate_sheets, get_all_sent_emails
         svc = authenticate_sheets(credentials=_creds)
         today_iso = datetime.date.today().isoformat()
