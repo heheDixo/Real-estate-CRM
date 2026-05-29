@@ -565,7 +565,12 @@ def run_morning_pipeline() -> Dict:
     # empty "To" so the broker pastes the real client email before sending.
     broker_self = {
         e.lower().strip()
-        for e in (config.BROKER_EMAIL, config.AGENT_EMAIL, config.GMAIL_SENDER)
+        for e in (
+            *config.BROKER_EMAILS,
+            config.BROKER_EMAIL,
+            config.AGENT_EMAIL,
+            config.GMAIL_SENDER,
+        )
         if e
     }
     if service:
@@ -613,11 +618,15 @@ def run_morning_pipeline() -> Dict:
         pass
 
     # ── 6. Broker digest ─────────────────────────────────────────────────
-    if service and config.BROKER_EMAIL:
-        try:
-            send_morning_digest(service, config.BROKER_EMAIL, reports)
-        except Exception as exc:
-            _log_error("scheduler.digest", exc)
+    # Fan out to every address in BROKER_EMAILS so multiple stakeholders can
+    # subscribe to the morning digest. Each send is isolated — one bad
+    # recipient address doesn't stop the rest from receiving.
+    if service:
+        for recipient in config.BROKER_EMAILS:
+            try:
+                send_morning_digest(service, recipient, reports)
+            except Exception as exc:
+                _log_error(f"scheduler.digest[{recipient}]", exc)
 
     # ── 6b. Sync yesterday's Gmail sends into Sheets + Calendar ──────────
     # Picks up anything the broker sent from Gmail directly that the

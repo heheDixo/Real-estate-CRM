@@ -31,8 +31,13 @@ REQUIRED = [
     "ALLOWED_EMAILS",
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_BOT_USERNAME",
-    "BROKER_EMAIL",
     "TIMEZONE",
+]
+
+# Pairs where at least one of the two must be set. The list form is
+# preferred for fan-out; the singular is the back-compat fallback.
+REQUIRED_EITHER_OR = [
+    ("BROKER_EMAIL", "BROKER_EMAILS"),
 ]
 
 OPTIONAL = [
@@ -40,6 +45,7 @@ OPTIONAL = [
     "HUNTER_API_KEY",
     "FIRECRAWL_API_KEY",
     "ALERT_EMAIL",
+    "ALERT_EMAILS",
     "SHEETS_SPREADSHEET_ID",
     "CALENDAR_ID",
 ]
@@ -55,6 +61,15 @@ def main() -> int:
         else:
             print(f"  ❌ {var} — MISSING")
             missing.append(var)
+
+    for pair in REQUIRED_EITHER_OR:
+        chosen = next((v for v in pair if os.getenv(v)), None)
+        label = " / ".join(pair) + " (one required)"
+        if chosen:
+            print(f"  ✅ {label}  — using {chosen}")
+        else:
+            print(f"  ❌ {label} — MISSING")
+            missing.append(label)
 
     print("\nChecking optional env vars...")
     for var in OPTIONAL:

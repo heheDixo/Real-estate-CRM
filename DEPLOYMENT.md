@@ -46,6 +46,10 @@ FORCE_MOCK_MODE=false
 AGENT_NAME=Michael Hartley
 FIRM_NAME=Hartley CRE Partners
 BROKER_EMAIL=michael@hartleycre.com
+# Optional fan-out for the morning digest — comma-separated. Every address
+# receives the digest; one bad recipient doesn't stop the others. Leave
+# unset to default to just BROKER_EMAIL.
+# BROKER_EMAILS=michael@hartleycre.com,partner@hartleycre.com
 
 # ── Gmail SMTP (alert mirror + Send-now) ──────────────
 GMAIL_SENDER=michael@hartleycre.com
@@ -80,6 +84,9 @@ START_SCHEDULER=true
 
 # ── Monitoring ────────────────────────────────────────
 ALERT_EMAIL=michael@hartleycre.com
+# Optional fan-out for failure alerts — comma-separated. Defaults to
+# ALERT_EMAIL, then BROKER_EMAILS, then BROKER_EMAIL.
+# ALERT_EMAILS=ops@hartleycre.com,michael@hartleycre.com
 HEALTH_PORT=8000
 
 # ── Optional data sources (graceful degradation) ──────

@@ -32,6 +32,14 @@ RESEARCH_CRON_HOUR   = int(os.getenv("RESEARCH_CRON_HOUR",   "5"))
 RESEARCH_CRON_MINUTE = int(os.getenv("RESEARCH_CRON_MINUTE", "0"))
 DIGEST_SEND_HOUR     = int(os.getenv("DIGEST_SEND_HOUR",     "7"))
 BROKER_EMAIL         = os.getenv("BROKER_EMAIL", "")
+# Optional fan-out: comma-separated list of all addresses that should
+# receive the morning digest. Defaults to [BROKER_EMAIL] for back-compat
+# when only the singular is set.
+BROKER_EMAILS        = [
+    e.strip()
+    for e in os.getenv("BROKER_EMAILS", BROKER_EMAIL).split(",")
+    if e.strip()
+]
 TIMEZONE             = os.getenv("TIMEZONE", "America/New_York")
 START_SCHEDULER      = os.getenv("START_SCHEDULER", "false").lower() == "true"
 
