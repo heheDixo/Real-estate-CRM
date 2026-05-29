@@ -121,7 +121,7 @@ def ensure_user_sheet(service, user: Dict,
     try:
         created = service.spreadsheets().create(
             body={"properties": {"title": title}},
-            fields="spreadsheetId",
+            fields="spreadsheetId,sheets.properties",
         ).execute()
     except Exception as exc:
         _log_error("sheets.ensure_user_sheet.create", exc)
@@ -130,6 +130,31 @@ def ensure_user_sheet(service, user: Dict,
     sid = (created.get("spreadsheetId") or "").strip()
     if not sid:
         return ""
+
+    # Rename the default "Sheet1" tab to "Sent Emails" and seed the header
+    # row so the spreadsheet opens *on* the data — otherwise users land on
+    # an empty Sheet1 and have to hunt for the "Sent Emails" tab at the
+    # bottom. One batchUpdate handles both: rename + write headers.
+    try:
+        default_props = (created.get("sheets") or [{}])[0].get("properties") or {}
+        default_id    = default_props.get("sheetId", 0)
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=sid,
+            body={"requests": [{
+                "updateSheetProperties": {
+                    "properties": {"sheetId": default_id, "title": SHEET_NAME},
+                    "fields":     "title",
+                },
+            }]},
+        ).execute()
+        service.spreadsheets().values().update(
+            spreadsheetId=sid,
+            range=f"{SHEET_NAME}!A1",
+            valueInputOption="RAW",
+            body={"values": [HEADERS]},
+        ).execute()
+    except Exception as exc:
+        _log_error("sheets.ensure_user_sheet.init_tab", exc)
 
     try:
         from database import update_user

@@ -277,6 +277,39 @@ def render_sidebar() -> None:
         st.page_link("pages/6_sent_tracker.py",     label="Sent")
         st.page_link("pages/7_followups.py",        label="Follow-ups")
 
+        # Quick links — open the signed-in user's own Google surfaces in a
+        # new tab. Sheet only shows once they've sent at least one email
+        # (and thus auto-created their spreadsheet).
+        _sheet_id = (_user.get("sheets_spreadsheet_id") or "").strip()
+        st.markdown(
+            '<div style="margin-top:18px;padding-top:14px;'
+            'border-top:1px solid var(--border);">'
+            '<div style="font-family:var(--font-mono);font-size:9px;'
+            'color:var(--text-muted);text-transform:uppercase;'
+            'letter-spacing:0.22em;padding:0 0 8px;">— Quick links</div>',
+            unsafe_allow_html=True,
+        )
+        _link_style = (
+            "display:block;font-family:var(--font-mono);font-size:11px;"
+            "color:var(--text-secondary);text-decoration:none;padding:4px 0;"
+            "letter-spacing:0.04em;"
+        )
+        st.markdown(
+            f'<a href="https://calendar.google.com/calendar/u/0/r" '
+            f'target="_blank" style="{_link_style}">📅 Calendar follow-ups ↗</a>'
+            f'<a href="https://drive.google.com/drive/u/0/recent" '
+            f'target="_blank" style="{_link_style}">📁 Research docs (Drive) ↗</a>'
+            + (
+                f'<a href="https://docs.google.com/spreadsheets/d/{_sheet_id}/edit" '
+                f'target="_blank" style="{_link_style}">📊 Sent tracker ↗</a>'
+                if _sheet_id else
+                f'<div style="{_link_style}opacity:0.45;">📊 Sent tracker — '
+                f'sends after first email</div>'
+            )
+            + '</div>',
+            unsafe_allow_html=True,
+        )
+
         # Active profile — derived from watchlist
         import os, json
         try:
