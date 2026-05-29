@@ -30,3 +30,7 @@ google-api-python-client>=2.100.0
 # ── Optional free data sources (graceful fallback if key absent) ──
 firecrawl-py>=0.0.5
 newsapi-python>=0.2.7
+
+# ── LinkedIn guest scraping (no login) ─────────────────────────
+beautifulsoup4>=4.12.0
+lxml>=5.1.0

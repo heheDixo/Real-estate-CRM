@@ -231,13 +231,14 @@ def _build_signal_from_label(label: str,
 
     if sig_type == "hiring" and jobs:
         # hiring signals attach to the job postings rather than articles
+        from scrapers.linkedin_jobs import SOURCE_LABEL as _LI_SOURCE
         office_jobs = [j for j in jobs if j.get("is_office_role")]
         if office_jobs:
             return Signal(
                 type=sig_type,
                 title=f"Posted {len(office_jobs)} office/workplace role(s)",
                 description=f"Including: {office_jobs[0].get('title', '')}",
-                source="LinkedIn Jobs",
+                source=_LI_SOURCE,
                 strength=max(strength, 4),
                 score=max(score, 75.0),
             )
@@ -245,7 +246,7 @@ def _build_signal_from_label(label: str,
             type=sig_type,
             title=f"{len(jobs)} active job postings detected",
             description=f"Most recent: {jobs[0].get('title', '')}",
-            source="LinkedIn Jobs",
+            source=_LI_SOURCE,
             strength=strength,
             score=score,
         )
@@ -393,6 +394,63 @@ def generate_report(prospect: Dict,
         if sig:
             signals.append(sig)
 
+    # LinkedIn-derived signal injection. The bart-mnli hiring path inside
+    # _build_signal_from_label can produce a weak "X active job postings"
+    # LinkedIn signal at whatever low confidence bart-mnli returned on bare
+    # job titles. We override that with a deterministic score so a clear CRE
+    # signal isn't masked by bart-mnli noise.
+    try:
+        from scrapers.linkedin_jobs import summarise_jobs, SOURCE_LABEL as _LI_SOURCE
+        job_summary = summarise_jobs(jobs, company)
+    except Exception:
+        job_summary = {"office_signal_count": 0, "total_jobs": 0, "office_roles": []}
+        _LI_SOURCE = "LinkedIn Jobs · last 7 days"
+
+    injected_signal = None
+    if job_summary.get("office_signal_count", 0) > 0:
+        office_roles = ", ".join(job_summary["office_roles"][:2])
+        injected_signal = Signal(
+            type="hiring",
+            title=(
+                f"{job_summary['office_signal_count']} office role(s) "
+                f"posted on LinkedIn"
+            ),
+            description=(
+                f"{company} is actively hiring: {office_roles}. "
+                f"Office-specific hiring is a direct indicator of space "
+                f"planning activity."
+            ),
+            source=_LI_SOURCE,
+            strength=5 if job_summary["office_signal_count"] >= 2 else 4,
+            score=90.0 if job_summary["office_signal_count"] >= 2 else 75.0,
+        )
+    elif job_summary.get("total_jobs", 0) >= 3:
+        injected_signal = Signal(
+            type="hiring",
+            title=(
+                f"{job_summary['total_jobs']} open roles posted in last 7 days"
+            ),
+            description=(
+                f"{company} has {job_summary['total_jobs']} active job "
+                f"postings in the last week — strong hiring velocity signal."
+            ),
+            source=_LI_SOURCE,
+            strength=3,
+            score=55.0,
+        )
+
+    if injected_signal is not None:
+        # Drop any weaker LinkedIn signal the bart-mnli hiring path produced
+        # so we don't double-count and so the deterministic score wins.
+        signals = [
+            s for s in signals
+            if not ("linkedin" in (s.source or "").lower()
+                    and s.score < injected_signal.score)
+        ]
+        # If a LinkedIn signal *stronger* than ours already exists, skip.
+        if not any("linkedin" in (s.source or "").lower() for s in signals):
+            signals.append(injected_signal)
+
     # Sort by score descending so strongest is first
     signals.sort(key=lambda s: s.score, reverse=True)
     report.signals = signals
@@ -445,13 +503,14 @@ def _mock_fallback(report: ResearchReport,
     enrichment = enrichment or {}
 
     if jobs:
+        from scrapers.linkedin_jobs import SOURCE_LABEL as _LI_SOURCE
         office_jobs = [j for j in jobs if j.get("is_office_role")]
         if office_jobs:
             signals.append(Signal(
                 type="hiring",
                 title=f"{len(office_jobs)} office/workplace role(s) posted",
                 description=f"Including {office_jobs[0].get('title','')}",
-                source="LinkedIn Jobs",
+                source=_LI_SOURCE,
                 strength=4, score=78.0,
             ))
 

@@ -188,7 +188,10 @@ def save_research_report(report) -> str:
             "source":           getattr(report, "source", "watchlist"),
             "run_date":         date.today().isoformat(),
         }
-        result = db.table("research_reports").insert(row).execute()
+        result = db.table("research_reports").upsert(
+            row,
+            on_conflict="run_date,prospect_id",
+        ).execute()
         return result.data[0]["id"] if result.data else ""
     except Exception as e:
         _log_error("save_research_report", str(e))

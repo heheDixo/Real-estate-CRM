@@ -529,7 +529,7 @@ RESEARCH_SIGNAL_LABEL_TYPES = {
 # Research tier thresholds (different from scoring tiers — research is daily)
 RESEARCH_TIER_HOT     = 75
 RESEARCH_TIER_WARM    = 50
-RESEARCH_SKIP_BELOW   = 30
+RESEARCH_SKIP_BELOW   = 15
 
 # Tone variants used on page 3 (draft review).
 # Each prefix is prepended verbatim to the system prompt so Mistral biases

@@ -144,15 +144,19 @@ def _gather_signals(prospect: Dict) -> Dict:
     """Run all scrapers for one prospect and return a bundle of raw data."""
     from scrapers import (
         scrape_google_news, scrape_newsapi, scrape_firecrawl,
+        scrape_linkedin_jobs, get_linkedin_snapshot,
     )
 
     company = prospect.get("company", "")
     website = prospect.get("website", "")
+    city    = prospect.get("city", "New York")
 
-    # LinkedIn jobs scraping is disabled for now — the research_agent still
-    # accepts a `jobs` list, so this can be re-enabled later by populating
-    # bundle["jobs"] from a different source without touching downstream code.
-    bundle = {"articles": [], "jobs": [], "website": {}}
+    bundle = {
+        "articles":          [],
+        "jobs":              [],
+        "website":           {},
+        "linkedin_snapshot": {},
+    }
 
     n_gnews, n_newsapi = 0, 0
 
@@ -175,6 +179,19 @@ def _gather_signals(prospect: Dict) -> Dict:
             bundle["website"] = scrape_firecrawl(website) or {}
         except Exception as exc:
             _log_error("scheduler.firecrawl", exc)
+
+    # LinkedIn jobs — rate-limited to 1 req per 30s globally inside the
+    # scraper. Sequential by definition; do not call from a thread pool.
+    try:
+        bundle["jobs"] = scrape_linkedin_jobs(company, city) or []
+    except Exception as exc:
+        _log_error("scheduler.linkedin_jobs", exc)
+
+    # Google snippet for LinkedIn company page — defensive, low-risk.
+    try:
+        bundle["linkedin_snapshot"] = get_linkedin_snapshot(company) or {}
+    except Exception as exc:
+        _log_error("scheduler.linkedin_google", exc)
 
     # Fold the company website into the article list as a synthesized
     # "Company website" entry so research_agent's classifier picks it up.
@@ -501,21 +518,24 @@ def run_morning_pipeline() -> Dict:
 
     _write_progress(40, f"Scraping signals for {len(all_prospects)} prospects…")
 
+    # Sequential — LinkedIn enforces a 30s minimum between scraper calls
+    # globally; running prospects in parallel would just serialise behind
+    # the rate limiter and risk concurrent-access bugs in the shared
+    # _last_request_time state inside scrapers/linkedin_jobs.py.
     reports: List = []
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = {
-            pool.submit(_process_prospect, p, tone_injection, "Warm"): p
-            for p in all_prospects
-        }
-        for fut in as_completed(futures):
-            rep = fut.result()
-            if rep is None:
-                summary["errors"].append({
-                    "prospect": futures[fut].get("company"),
-                    "error":    "process_prospect returned None",
-                })
-                continue
-            reports.append(rep)
+    for p in all_prospects:
+        try:
+            rep = _process_prospect(p, tone_injection, "Warm")
+        except Exception as exc:
+            _log_error("scheduler.process_prospect", exc)
+            rep = None
+        if rep is None:
+            summary["errors"].append({
+                "prospect": p.get("company"),
+                "error":    "process_prospect returned None",
+            })
+            continue
+        reports.append(rep)
 
     _write_progress(80, "Drafts generated.")
 

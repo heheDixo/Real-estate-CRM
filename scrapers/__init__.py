@@ -17,6 +17,11 @@ from scrapers.apollo_scraper   import (
     reveal_email         as apollo_reveal_email,
 )
 from scrapers.jobs_board       import scrape as scrape_jobs_board
+from scrapers.linkedin_jobs    import (
+    scrape_linkedin_jobs,
+    summarise_jobs as summarise_linkedin_jobs,
+)
+from scrapers.linkedin_google  import get_linkedin_snapshot
 
 __all__ = [
     "scrape_google_news",
@@ -28,4 +33,7 @@ __all__ = [
     "scrape_apollo_people",
     "apollo_reveal_email",
     "scrape_jobs_board",
+    "scrape_linkedin_jobs",
+    "summarise_linkedin_jobs",
+    "get_linkedin_snapshot",
 ]
