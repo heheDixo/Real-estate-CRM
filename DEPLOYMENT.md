@@ -1,136 +1,234 @@
-# Deployment notes — CRE Outreach Intelligence
+# Deployment Guide — CRE Outreach Intelligence
 
-Covers the one-time setup for the four external services this project depends on (HuggingFace, Supabase, Google Cloud OAuth, Telegram BotFather), plus local-dev startup and production deployment notes.
+## Architecture
 
----
+- **web**: Streamlit app (the broker's UI) — Railway service 1
+- **api**: FastAPI (Google OAuth callback + Telegram webhook) — Railway service 2
+- **worker**: APScheduler daemon (04:50 warm-up + 05:00 pipeline) — Railway service 3
+- **database**: Supabase Postgres (always on, separate from Railway)
 
-## HuggingFace token
-
-1. Sign in at https://huggingface.co → Settings → Access Tokens.
-2. Create a token with **read** scope. Copy it (`hf_...`).
-3. Add to `.env`:
-   ```
-   HF_TOKEN=hf_...
-   ```
-
-Scoring (bart-mnli) runs on the free `hf-inference` provider. Drafting (Llama-3.1-8B-Instruct) routes through the OpenAI-style `/v1/chat/completions` endpoint and consumes the **$0.10/mo free Inference Providers credits** per HF account ($2.00/mo on PRO). When credits run out the writer returns empty and the template fallback in `hf_models/writer._build_fallback_draft` kicks in — drafts still land in Gmail, just less personalised.
+The [`Procfile`](Procfile) declares all three processes; Railway picks them up automatically and creates three services from a single repo deploy.
 
 ---
 
-## Supabase project (one-time)
+## One-time Railway setup
 
-1. Create a free project at https://supabase.com.
-2. Open SQL Editor → paste [`setup_database.sql`](setup_database.sql) → Run. Creates 11 tables + 8 indexes. **RLS is off** — multi-tenant lockdown is deferred to Phase 4.5 (see [PROGRESS.md](PROGRESS.md) §8).
-3. Project Settings → API → copy:
-   ```
-   SUPABASE_URL=https://xxxxxxxx.supabase.co
-   SUPABASE_ANON_KEY=eyJhbGciOi...
-   ```
-4. One-time seed migration (idempotent for prospects + tone profile; **don't re-run** for `approved_emails` — no natural unique key, will duplicate):
-   ```bash
-   python migrate_json_to_db.py
-   ```
-
----
-
-## Google OAuth setup (one-time, per Google Cloud project)
-
-1. Go to https://console.cloud.google.com → select the CRE project.
-2. **APIs & Services → Credentials → Create credentials → OAuth 2.0 Client ID**.
-3. Application type: **Web application**.
-4. Name: `CRE Outreach Web`.
-5. Authorised redirect URIs — add both:
-   - `http://localhost:8000/oauth/callback`            (local testing)
-   - `https://your-api-service.railway.app/oauth/callback`  (fill in after deploy)
-6. Click **Create** → download the JSON → note `client_id` and `client_secret`.
-7. Add to `.env`:
-   ```
-   GOOGLE_CLIENT_ID=your_client_id.apps.googleusercontent.com
-   GOOGLE_CLIENT_SECRET=your_client_secret
-   GOOGLE_REDIRECT_URI=http://localhost:8000/oauth/callback
-   ```
-
-### OAuth consent screen
-- User type: **External**
-- App name: `CRE Outreach Intelligence`
-- Scopes to add (non-sensitive + sensitive Gmail/Sheets/Calendar):
-  - `openid`
-  - `.../auth/userinfo.email`
-  - `.../auth/userinfo.profile`
-  - `.../auth/gmail.compose`
-  - `.../auth/gmail.readonly`
-  - `.../auth/gmail.send`
-  - `.../auth/spreadsheets`
-  - `.../auth/calendar`
-- Test users: add the client email(s) you intend to allow (e.g. `michael@hartleycre.com`).
-
-### Whitelist
-- `.env` → `ALLOWED_EMAILS=email1@x.com,email2@y.com` — only these can complete OAuth.
-
----
-
-## Telegram bot setup (optional — for the morning brief notification)
-
-1. Open Telegram → search **@BotFather** → start chat.
-2. Send `/newbot` → pick a display name (e.g. `CRE Outreach`) → pick a username ending in `bot` (e.g. `CREOutreachBot`).
-3. BotFather replies with a token like `7123456789:AAF...`. Add to `.env`:
-   ```
-   TELEGRAM_BOT_TOKEN=7123456789:AAF...
-   TELEGRAM_BOT_USERNAME=CREOutreachBot
-   ```
-4. Verify:
-   ```bash
-   curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getMe"
-   ```
-   Should return `{"ok":true,"result":{...}}`.
-
-**Connecting your account** (one-time): open the dashboard, the connect banner on the research page shows a one-tap deep link. Or in any Telegram client, message the bot:
-```
-/start <your-user-uuid-from-supabase-users-table>
-```
-
-This sets `users.telegram_chat_id` and `users.telegram_connected=true` so the scheduler's morning brief lands on your phone.
-
-**Webhook vs polling.** For local dev, polling is fine — run `python -c "from telegram_bot import run_polling; run_polling()"` in a separate terminal. For production, register the webhook against your public FastAPI URL **once**:
-```bash
-curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
-    -d "url=https://<your-api-host>/telegram/webhook"
-```
-The route handler is already in [`oauth_server.py`](oauth_server.py) — no code change needed.
-
----
-
-## Running locally
-
-Two terminals:
+### 1. Push to GitHub
 
 ```bash
-# Terminal 1 — OAuth callback server
-uvicorn oauth_server:app --host 0.0.0.0 --port 8000 --reload
+git init  # if not already a git repo
+git add .
+git commit -m "Initial production build"
+git remote add origin https://github.com/yourusername/cre-outreach.git
+git push -u origin main
+```
 
-# Terminal 2 — Streamlit UI
+### 2. Create Railway project
+
+1. Go to [railway.app](https://railway.app) → **New Project**
+2. **Deploy from GitHub repo** → select your repo
+3. Railway detects the [Procfile](Procfile) and creates 3 services:
+   - `web` (Streamlit)
+   - `api` (FastAPI)
+   - `worker` (scheduler)
+
+### 3. Set environment variables
+
+In the Railway dashboard → each service → **Variables** tab.
+Set **all** of these on **all three** services (Railway doesn't share env between services by default):
+
+```
+# ── Core ──────────────────────────────────────────────
+HF_TOKEN=hf_...
+FORCE_MOCK_MODE=false
+
+# ── Broker identity (appears in drafts) ───────────────
+AGENT_NAME=Michael Hartley
+FIRM_NAME=Hartley CRE Partners
+BROKER_EMAIL=michael@hartleycre.com
+
+# ── Gmail SMTP (alert mirror + Send-now) ──────────────
+GMAIL_SENDER=michael@hartleycre.com
+GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
+
+# ── Google OAuth (Web-app client) ─────────────────────
+GOOGLE_CLIENT_ID=your_client_id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your_client_secret
+GOOGLE_REDIRECT_URI=https://YOUR_API_SERVICE.railway.app/oauth/callback
+
+# ── Public URLs (fill once Railway assigns them) ──────
+FASTAPI_URL=https://YOUR_API_SERVICE.railway.app
+STREAMLIT_URL=https://YOUR_WEB_SERVICE.railway.app
+
+# ── Supabase ──────────────────────────────────────────
+SUPABASE_URL=https://xxxx.supabase.co
+SUPABASE_ANON_KEY=eyJ...
+
+# ── Email whitelist (comma-separated) ─────────────────
+ALLOWED_EMAILS=michael@hartleycre.com
+
+# ── Telegram ──────────────────────────────────────────
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_BOT_USERNAME=YourBotName
+
+# ── Scheduling ────────────────────────────────────────
+RESEARCH_CRON_HOUR=5
+RESEARCH_CRON_MINUTE=0
+DIGEST_SEND_HOUR=7
+TIMEZONE=America/New_York
+START_SCHEDULER=true
+
+# ── Monitoring ────────────────────────────────────────
+ALERT_EMAIL=michael@hartleycre.com
+HEALTH_PORT=8000
+
+# ── Optional data sources (graceful degradation) ──────
+NEWSAPI_KEY=...
+HUNTER_API_KEY=...
+FIRECRAWL_API_KEY=...
+SHEETS_SPREADSHEET_ID=...
+CALENDAR_ID=primary
+```
+
+### 4. Capture your Railway URLs
+
+After the first deploy Railway assigns each service a public URL:
+
+- `web`:    `https://cre-outreach-web-production.up.railway.app`
+- `api`:    `https://cre-outreach-api-production.up.railway.app`
+- `worker`: no public URL needed
+
+Update three env vars with the real values:
+
+| Var | Value |
+|---|---|
+| `FASTAPI_URL`          | the **api** service URL |
+| `STREAMLIT_URL`        | the **web** service URL |
+| `GOOGLE_REDIRECT_URI`  | the **api** service URL + `/oauth/callback` |
+
+Redeploy after editing variables (Railway auto-triggers on save).
+
+### 5. Update Google Cloud Console
+
+Add the real Railway redirect URI to your OAuth client:
+
+1. [console.cloud.google.com](https://console.cloud.google.com) → **APIs & Services → Credentials**
+2. Edit your OAuth 2.0 Client ID
+3. Add to **Authorised redirect URIs**: `https://YOUR_API_SERVICE.railway.app/oauth/callback`
+4. **Save**
+
+### 6. Register the Telegram webhook
+
+Run once after deploy (replace `{TOKEN}` and the URL):
+
+```bash
+curl -X POST "https://api.telegram.org/bot{YOUR_BOT_TOKEN}/setWebhook" \
+  -d "url=https://YOUR_API_SERVICE.railway.app/telegram/webhook"
+```
+
+Expected: `{"ok":true,"result":true,"description":"Webhook was set"}`
+
+### 7. Verify deployment
+
+```bash
+# API health
+curl https://YOUR_API_SERVICE.railway.app/health
+# Expected: {"status":"ok","ts":"...","database":"connected"}
+
+# Streamlit loads
+# Open https://YOUR_WEB_SERVICE.railway.app in a browser
+# Expected: dark login page with "Sign in with Google" button
+```
+
+### 8. First login
+
+1. Open the Streamlit URL
+2. Click **Sign in with Google**
+3. Sign in with a whitelisted email (`michael@hartleycre.com`)
+4. Should land on the research dashboard
+5. Click **Connect Telegram** banner → tap **Start** in the bot
+6. Click **Run pipeline** to verify end-to-end flow before the 5am cron fires
+
+---
+
+## Ongoing maintenance
+
+### Redeploy after code changes
+
+```bash
+git add <specific files>
+git commit -m "your message"
+git push
+# Railway auto-deploys on push to the tracked branch
+```
+
+### Check the scheduler ran this morning
+
+- Open app → sidebar → **Pipeline history**
+- Today's run should show status `success` (or `no_actionable` on a quiet day)
+
+### If OAuth token expires
+
+Rare — Google refresh tokens are long-lived. If `session_manager.get_google_credentials()` starts returning `None`:
+1. Sign out of the app
+2. Sign in again — fresh `refresh_token` persists to `users.google_token` JSONB
+
+### Add a second client (Phase 4.5 prerequisite)
+
+Multi-tenant requires the RLS work from [PROGRESS.md](PROGRESS.md) §8. Until that lands the per-user data isolation isn't enforced. Sequence once RLS is on:
+
+1. New client creates a Telegram bot via BotFather and shares the token
+2. Add their email to `ALLOWED_EMAILS` on **all three** Railway services
+3. They sign in via the Streamlit URL — their `users` row is created
+4. They `/start <user_id>` the bot to connect Telegram
+5. Send them the Streamlit URL
+
+---
+
+## Verify locally before pushing
+
+```bash
+# 1. All required env vars present
+python check_env.py
+
+# 2. Streamlit boots
 python -m streamlit run app.py
+# Open http://localhost:8501 — dark login page
+
+# 3. FastAPI boots
+uvicorn oauth_server:app --host 0.0.0.0 --port 8000
+# curl http://localhost:8000/health — JSON
+
+# 4. Scheduler runs end-to-end
+python scheduler.py --once
+
+# 5. No secrets staged
+git status
+# .env should NOT appear
+# data/*.json (except .gitkeep) should NOT appear
+# credentials.json should NOT appear
+
+# 6. Push
+git add <files>
+git commit -m "Production build — phases 1-5 complete"
+git push
+
+# 7. Post-deploy health
+curl https://YOUR_API_SERVICE.railway.app/health
+
+# 8. Post-deploy webhook
+curl -X POST "https://api.telegram.org/bot{TOKEN}/setWebhook" \
+  -d "url=https://YOUR_API_SERVICE.railway.app/telegram/webhook"
+
+curl "https://api.telegram.org/bot{TOKEN}/getWebhookInfo"
+# Verifies the webhook URL was accepted
 ```
 
-Open http://localhost:8501 → click **Sign in with Google**.
+---
 
-## Production deploy (Railway / Fly / Render)
+## What comes after deployment (Phase 6)
 
-Use the `Procfile` in the repo root:
-
-```
-web:    streamlit run app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true
-api:    uvicorn oauth_server:app --host 0.0.0.0 --port 8000
-worker: python scheduler.py
-```
-
-Set these env vars on the host:
-- All vars from `.env.example` (including `HF_TOKEN`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `ALLOWED_EMAILS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME` if you want phone alerts)
-- `GOOGLE_REDIRECT_URI` → the public HTTPS URL for `/oauth/callback`
-- `FASTAPI_URL` → the public URL of the `api` service
-- `STREAMLIT_URL` → the public URL of the `web` service
-
-After the first deploy:
-1. **Add the public redirect URI** to your OAuth client in Google Cloud Console (`https://<api-host>/oauth/callback`).
-2. **Register the Telegram webhook** against the public `api` host (see Telegram section above). Telegram will then POST `/start` events directly to `/telegram/webhook` instead of you needing to run the polling loop.
-3. **Point UptimeRobot (or similar) at `/health`** — that endpoint returns `{status, ts, database}`, useful for keeping the worker container warm.
+- UptimeRobot pinging `/health` every 5 min so the worker container stays warm
+- Pipeline-history page in the Streamlit UI
+- Hand the Streamlit URL to the broker
+- Watch the first 05:00 ET run succeed (Telegram brief lands ~05:05)

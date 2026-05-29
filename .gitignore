@@ -1,32 +1,36 @@
 # ── Secrets — NEVER commit ────────────────────────────────────────────────
 .env
 .env.local
+.env.production
 *.env
 !.env.example
 
-# Google OAuth client secret + cached user tokens
 credentials.json
+auth_config.yaml
 client_secret*.json
+data/gmail_token.json
+data/sheets_token.json
+data/calendar_token.json
+data/docs_token.json
+data/token.json
 data/*_token.json
 
 # Broker correspondence archive (real names / bodies) — kept local only
 data/approved_emails.json
 data/tone_archive.json
 
-# ── Per-run pipeline output (regenerated daily) ──────────────────────────
-data/morning_run_*.json
-data/discovered_leads_*.json
+# ── Per-run / cache data (Supabase is source of truth in production) ─────
+data/*.json
+!data/.gitkeep
 
 # ── Logs / transient state ───────────────────────────────────────────────
-data/error_log.json
-data/scheduler_log.json
-data/pipeline_progress.json
 *.log
 
 # ── Python ───────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyo
 *.so
 .Python
 *.egg-info/
