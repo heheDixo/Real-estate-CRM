@@ -1,10 +1,12 @@
 # Progress so far — CRE Outreach Intelligence
 
-Status as of **2026-05-29**. Covers Phase 1 (database foundation),
+Status as of **2026-05-30**. Covers Phase 1 (database foundation),
 Phase 2 (Google OAuth login), Phase 3 (HuggingFace model hardening),
 Phase 4 (Telegram bot), Phase 5 (LinkedIn signal scrapers + scoring
 tune), Phase 6 (broker-email fan-out + per-broker identity prompts),
-and Phase 7 (Railway production deployment — live as of this update).
+Phase 7 (Railway production deployment — live as of this update), and
+Phase 8 (per-user Google action routing — multi-tenant web app, cron
+stays single-tenant).
 
 The production app is reachable at
 **https://web-production-a655b.up.railway.app** (Streamlit) and
@@ -804,7 +806,170 @@ for r in get_most_recent_reports():
 
 ---
 
-## 12. Deferred decisions / next phases
+## 12. Phase 8 — Per-user Google action routing (✅ complete)
+
+**Why this phase existed.** Phase 2 stood up the OAuth flow correctly
+(token-per-user in `users.google_token`), but every UI page called
+`authenticate_gmail()` / `authenticate_sheets()` / `authenticate_calendar()`
+*without* passing the logged-in user's credentials. With no `credentials=`
+argument, those helpers fell through to `google_auth_loader.load_user_credentials_from_db`,
+which did `db.table("users").select("...").limit(1).execute()` — i.e. they
+always grabbed whichever user happened to be row 1 (the primary broker).
+Net result: when a second broker signed in on the web, every draft they
+created, every Send-now they fired, every research doc they generated,
+every follow-up event they triggered, every sheet row they appended landed
+in the *primary broker's* Google account — not theirs.
+
+The same shape of bug also lived in the **Send-now** SMTP path: it
+authenticated via `GMAIL_ADDRESS` / `GMAIL_APP_PASSWORD` (single
+env-var pair = the primary broker's app password), so even after fixing
+the OAuth fallthrough, every web user's sends would still leave from
+the primary mailbox.
+
+### What landed
+
+**Credential plumbing — every helper now takes per-user creds.**
+- [`google_auth_loader.py`](google_auth_loader.py) — `load_user_credentials_from_db(default_scopes, user_id=None)`.
+  Resolution order is **explicit `user_id` → `PRIMARY_USER_ID` env →
+  `PRIMARY_BROKER_EMAIL`/`BROKER_EMAIL` env (matched against `users.google_email`)
+  → row-1 fallback**. The row-1 fallback is preserved so the cron keeps
+  working when no user is logged in, but the UI now never reaches it.
+- [`gmail_drafts.py`](gmail_drafts.py),
+  [`google_sheets.py`](google_sheets.py),
+  [`google_calendar.py`](google_calendar.py),
+  [`google_docs.py`](google_docs.py) — every `authenticate_*` signature is
+  now `(credentials=None, user_id=None)`. When `credentials` is passed in
+  (UI path), it's used as-is. When omitted (scheduler / cron path), the
+  loader resolves `user_id` or falls back to the env pin.
+- [`google_docs.create_research_doc`](google_docs.py) — also accepts
+  `credentials=` and `user_id=` so the on-demand "Generate research doc"
+  button on page 5 lands the dossier in the *signed-in* user's Drive.
+
+**Pages now pass the logged-in user's creds.**
+Each page reads `_creds = get_google_credentials(_user)` once at the top
+(where `_user = st.session_state.get("current_user")`), and passes
+`credentials=_creds` to every `authenticate_*` call:
+- [`pages/3_draft_review.py`](pages/3_draft_review.py) — Gmail draft + Send-now
+  + Sheets log + Calendar follow-up + auto-rename of contact.
+- [`pages/5_morning_research.py`](pages/5_morning_research.py) — sent-today
+  lookup + on-demand research-doc generator.
+- [`pages/6_sent_tracker.py`](pages/6_sent_tracker.py) — sent feed.
+- [`pages/7_followups.py`](pages/7_followups.py) — calendar list + Mark-replied.
+
+**Send-now now uses the Gmail API, not SMTP.**
+The new `gmail_drafts.send_email_now(service, to, subject, body)` posts
+via `users.messages.send` with `userId="me"`, so the email leaves from
+whoever is signed in. The SMTP + shared-app-password path in
+[`pages/3_draft_review.py`](pages/3_draft_review.py) is gone. The
+`From:` header forcing in `gmail_drafts._build_message` is also gone
+(sender defaults to `"me"` — the Gmail API picks up the credential
+owner). `GMAIL_APP_PASSWORD` is still used by `monitoring.py` for SMTP
+failure alerts (correct — alerts always come from the ops mailbox).
+
+**OAuth scope expansion + forced re-consent.**
+`oauth_server.GOOGLE_SCOPES` and `session_manager.GOOGLE_SCOPES` both
+gained `https://www.googleapis.com/auth/documents` and
+`https://www.googleapis.com/auth/drive.file`. The "Generate research
+doc" button was 403'ing with `ACCESS_TOKEN_SCOPE_INSUFFICIENT` because
+the Docs API isn't covered by Gmail / Sheets / Calendar scopes. After
+this change every existing user has to sign out + sign in again so
+Google re-issues a token bound to the wider scope set — old tokens
+won't silently widen.
+
+**Per-user Google Sheets (no more shared sent-tracker).**
+- New nullable `users.sheets_spreadsheet_id TEXT` column. Migration:
+  ```sql
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS sheets_spreadsheet_id TEXT;
+  ```
+- New helpers in [`google_sheets.py`](google_sheets.py):
+  - `get_user_sheet_id(user) -> str` — read-only lookup, used on every
+    read path (sent-tracker, morning-research lookup, follow-ups Mark-replied).
+  - `ensure_user_sheet(service, user, title=…)` — lazily creates a new
+    spreadsheet in the signed-in user's Drive on first Send-now, renames
+    the default `Sheet1` tab to `Sent Emails`, writes the header row, and
+    persists the new ID to `users.sheets_spreadsheet_id` + the in-memory
+    `session_state["current_user"]` so the rest of this Streamlit run
+    can reuse it without an API round-trip.
+- Every write path on [`pages/3_draft_review.py`](pages/3_draft_review.py)
+  routes through `ensure_user_sheet`. Every read path routes through
+  `get_user_sheet_id` (returns `""` for users who haven't sent yet — those
+  pages show an empty state rather than paying the cost of creating a
+  sheet they may never write to).
+- The scheduler / `gmail_sync` keeps using `config.SHEETS_SPREADSHEET_ID`
+  — the cron is single-tenant by design (runs as the env-pinned primary
+  broker), and that env-var sheet is the master broker log.
+
+**Gated on credentials instead of a local file.**
+Page guards used to read `if os.path.exists(config.GOOGLE_CREDENTIALS_PATH):`
+which was only ever true on the developer's laptop (the file is gitignored).
+On Railway and for every web user other than the dev, the guard was
+silently False — Calendar follow-ups never fired, Sheets logging never
+ran, the sent-tracker and follow-ups pages showed "Drop credentials.json"
+empty states even though OAuth creds were perfectly valid in Supabase.
+Every gate now checks `_creds is not None` instead.
+
+**Dashboard quick-links toolbar + research-doc button promotion.**
+- [`pages/5_morning_research.py`](pages/5_morning_research.py) gained a
+  three-button toolbar immediately under the morning-brief header:
+  **📅 Calendar follow-ups · 📄 Research docs · Google Docs · 📊 Sent tracker · Sheet**.
+  Each opens in a new tab and is colour-accented (cobalt / gold / sage).
+  The Sheet button greys out until the user has sent their first email
+  and `ensure_user_sheet` has assigned them an ID.
+- The on-demand "Generate research doc" button now flips in-place to a
+  gold-accented "Open research doc ↗" button the moment the doc exists,
+  in the same slot — instead of quietly disappearing and leaving only a
+  small italic chip at the top.
+- [`ui_components.render_sidebar`](ui_components.py) gained a matching
+  "Quick links" section with the same three deep-links — collapsed text
+  style for sidebar density.
+
+**Admin: ALLOWED_EMAILS expanded.**
+The whitelist now covers four addresses (primary broker, the two ops
+users, and a stakeholder). New addresses must be added to
+`ALLOWED_EMAILS` on all three Railway services *and* as Test users on
+the Google Cloud OAuth consent screen, otherwise Google blocks the
+sign-in before the in-app whitelist check ever runs.
+
+### New env vars (Phase 8)
+
+| Var | Service(s) | Purpose |
+|---|---|---|
+| `PRIMARY_USER_ID` | worker | UUID of the broker the 5am cron acts as. Overrides everything else. |
+| `PRIMARY_BROKER_EMAIL` | worker | Fallback when `PRIMARY_USER_ID` is unset — match against `users.google_email`. Falls back to `BROKER_EMAIL` if unset. |
+
+If both are unset the worker falls back to the legacy row-1 behaviour,
+which still works while there's only one user in the table.
+
+### Required follow-ups when deploying Phase 8
+
+1. **Run the Supabase migration** (one-time):
+   ```sql
+   ALTER TABLE users ADD COLUMN IF NOT EXISTS sheets_spreadsheet_id TEXT;
+   ```
+2. **Google Cloud Console → OAuth consent screen → Scopes → Add or remove
+   scopes**: add `auth/documents` and `auth/drive.file`. Confirm Google
+   Docs API and Google Drive API are both enabled under **Library**.
+3. **Every user signs out + signs in again** so Google issues a token
+   with the new scope set. Old tokens hit `ACCESS_TOKEN_SCOPE_INSUFFICIENT`
+   the moment they touch `docs.googleapis.com`.
+4. **Set `PRIMARY_BROKER_EMAIL` on the worker** so the cron's identity
+   is pinned explicitly instead of relying on row-1.
+
+### What didn't change
+
+- The scheduler's morning pipeline is still single-tenant. Discovery,
+  scoring, drafting, Drive doc creation, digest fan-out all happen
+  under the env-pinned primary broker's identity. Phase 4.5 (RLS +
+  user-scoped tenant tables) is still the prerequisite for the
+  morning pipeline to be truly multi-tenant.
+- `data/watchlist.json`, `tone_profile.json`, and every Supabase
+  tenant-scoped table (`prospects`, `research_reports`, `sent_emails`,
+  …) are still shared across users. Multi-tenant data isolation is
+  Phase 4.5 work and not in scope for Phase 8.
+
+---
+
+## 13. Deferred decisions / next phases
 
 **RLS plan (Phase 4.5, before onboarding the 2nd client).** Every
 tenant-scoped table (`prospects`, `research_reports`, `sent_emails`,

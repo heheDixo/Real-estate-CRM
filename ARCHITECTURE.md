@@ -183,26 +183,37 @@ Fire-and-forget wrapper around the Telegram Bot API using plain `requests` (no `
 
 ## 6. Layer 4 — Google integrations
 
-Each module: minimal API surface. Credentials no longer live in per-service `data/*_token.json` files — Phase 2 moved them to `users.google_token` (JSONB) in Supabase, rehydrated by `google_auth_loader.py`. All `authenticate_*` functions now accept an optional `credentials` parameter; when omitted they call the shared loader (used by the scheduler since it has no Streamlit session).
+Each module: minimal API surface. Credentials no longer live in per-service `data/*_token.json` files — Phase 2 moved them to `users.google_token` (JSONB) in Supabase, rehydrated by `google_auth_loader.py`. Phase 8 added a `user_id` parameter alongside `credentials` so callers can target a *specific* user instead of the first row in the `users` table. All `authenticate_*` functions now have signature `(credentials=None, user_id=None)`:
+
+- If `credentials` is passed (UI path — every page does this with `get_google_credentials(_user)`), it's used as-is.
+- Otherwise the loader resolves the user in this order: explicit `user_id` → `PRIMARY_USER_ID` env → `PRIMARY_BROKER_EMAIL` / `BROKER_EMAIL` lookup against `users.google_email` → row-1 fallback (legacy single-user behaviour, kept so the cron keeps working).
 
 ### `gmail_drafts.py`
-`authenticate_gmail(credentials=None)` returns a Gmail service. `create_draft(service, to, subject, body, prospect_name)` builds a MIME message and posts to `users.drafts.create`. `send_morning_digest(service, broker_email, reports)` builds an HTML digest and `users.messages.send` to the broker. Also exposes `send_email_now()` for the **Send now** button on page 3.
+`authenticate_gmail(credentials=None, user_id=None)` returns a Gmail service. `create_draft(service, to, subject, body, prospect_name)` builds a MIME message and posts to `users.drafts.create`. `send_email_now(service, to_email, subject, body)` (Phase 8) sends immediately via `users.messages.send` with `userId="me"` so the email leaves from the authenticated user's mailbox — used by the **Send now** button on page 3, replacing the old SMTP + shared-app-password path that always sent from `GMAIL_ADDRESS`/`GMAIL_APP_PASSWORD`. `_build_message` no longer sets the `From:` header explicitly (Phase 8) so the Gmail API picks up the credential owner; this fixed the bug where every web user's drafts had `From: <primary broker>` even when authenticated as a different user. `send_morning_digest(service, broker_email, reports)` builds an HTML digest and sends to the broker.
 
 ### `google_sheets.py`
-`authenticate_sheets(credentials=None)`. `append_sent_row(service, spreadsheet_id, row)` appends to the configured sheet. `list_sent(service, spreadsheet_id)` reads the same sheet for the sent-tracker page. Empty sheet / missing ID → empty list.
+`authenticate_sheets(credentials=None, user_id=None)`. `append_sent_row(service, spreadsheet_id, row)` appends to a sheet. `list_sent(service, spreadsheet_id)` reads it back for the sent-tracker page.
+
+Phase 8 added two per-user helpers so each web user gets their own Sent-Emails spreadsheet in their own Drive:
+- `get_user_sheet_id(user) -> str` — read-only lookup of `user.sheets_spreadsheet_id`; returns `""` if the user hasn't sent anything yet. Used on every read path (sent-tracker, morning-research sent-today lookup, follow-ups Mark-replied).
+- `ensure_user_sheet(service, user, title="CRE Outreach — Sent Emails")` — lazily creates a new spreadsheet in the signed-in user's Drive on first Send-now, renames the default `Sheet1` tab to `Sent Emails`, writes the header row, and persists the new ID to `users.sheets_spreadsheet_id` + the in-memory session_state user dict. Subsequent sends reuse the persisted ID with no API round-trip. Used by every write path on page 3.
+
+The scheduler's `gmail_sync` still uses `config.SHEETS_SPREADSHEET_ID` because the cron has no logged-in user — that single env-var sheet is the master broker log.
 
 ### `google_calendar.py`
-`authenticate_calendar(credentials=None)`. `create_followup_event(service, calendar_id, summary, description, when, attendees=...)` creates a one-shot reminder. `list_upcoming(service, calendar_id, max_results=...)` powers the follow-ups page.
+`authenticate_calendar(credentials=None, user_id=None)`. `create_followup_event(service, calendar_id, summary, description, when, attendees=...)` creates a one-shot reminder. `list_upcoming(service, calendar_id, max_results=...)` powers the follow-ups page. `CALENDAR_ID=primary` resolves to each authenticated user's *own* primary calendar — so per-user routing comes for free on this connector with no extra plumbing.
 
 ### `google_docs.py`
-`authenticate_docs(credentials=None)`. `create_research_doc(report)` produces a per-prospect editorial dossier — one Google Doc with the company, signals, top hook, draft, and supporting articles. Linked from the morning research page so the broker can share or annotate.
+`authenticate_docs(credentials=None, user_id=None)`. `create_research_doc(report, folder_id="", credentials=None, user_id="")` (Phase 8 added the last two args) produces a per-prospect editorial dossier — one Google Doc with the company, signals, top hook, draft, and supporting articles. Linked from the morning research page so the broker can share or annotate. The dossier lands in the *signed-in* user's Drive when called from a Streamlit page; in the cron's Drive otherwise.
 
-### `oauth_server.py` (Phase 2 / Phase 4)
+### `oauth_server.py` (Phase 2 / Phase 4 / Phase 8)
 FastAPI sidecar on port 8000. Routes:
-- `GET /oauth/login` — Google consent redirect with PKCE verifier stored in `_PKCE_STORE` keyed by OAuth `state`
+- `GET /oauth/login` — Google consent redirect with PKCE verifier stored in `_PKCE_STORE` keyed by OAuth `state`. The consent request asks for ten scopes: `openid`, `userinfo.email`, `userinfo.profile`, `gmail.compose`, `gmail.readonly`, `gmail.send`, `spreadsheets`, `calendar`, plus Phase 8 additions `documents` and `drive.file` (required by the on-demand research-doc generator).
 - `GET /oauth/callback` — code exchange, userinfo lookup, whitelist check, upsert `users.google_token`, create a 30-day `sessions` row, redirect to `STREAMLIT_URL/?session=<token>`
 - `GET /health` — JSON `{status, ts, database}` for uptime monitoring
 - `POST /telegram/webhook` — Phase-4 real handler. Processes `/start <user_id>`, upserts `users.telegram_chat_id` + `telegram_connected=true`, sends a "Connected" message via `telegram_bot.send_message`.
+
+Scope changes require every user to sign out + sign in again — Google only re-issues tokens at consent time, it won't silently widen an existing token's scope set.
 
 ### `session_manager.py` (Phase 2)
 - `require_login()` — called by `ui_components.page_shell`. Checks `st.session_state["current_user"]`, validates `?session=` query param against `sessions` table, renders the dark login page (with a Sign-in-with-Google link pointing at `FASTAPI_URL/oauth/login`) when no valid session exists.
@@ -287,10 +298,10 @@ Shared widgets used across every page. Highlights:
 - `tier_badge`, `score_bar`, `strength_dots`, `signal_icon`, `signal_type_label`, `status_badge`, `new_badge`, `draft_ready_badge`, `sent_badge`, `info_row`, `section_header`, `metric_card`, `empty_state`, `api_status_row`, `pulse_dot`.
 
 ### `pages/5_morning_research.py`
-The home screen. **Phase 4 Telegram connect banner** sits immediately below `page_shell()` — hidden once `current_user.telegram_connected=true`, deep-links to `t.me/<BOT_USERNAME>?start=<user_uuid>`. Top bar with status pulse + **Run pipeline**. Polls `data/pipeline_progress.json` for the live bar. Primary data source is Supabase (`database.get_most_recent_reports`); falls back to `data/morning_run_<today>.json` (then stale banner). Filter pills (All / Hot / Warm / Nurture / New leads). 40/60 split: lead list with tier accent and badges (NEW / Draft ready / Sent) on the left, detail pane with signal cards on the right. Discovered leads have **Approve** / **Dismiss** actions; approved ones get promoted to the watchlist.
+The home screen. **Phase 4 Telegram connect banner** sits immediately below `page_shell()` — hidden once `current_user.telegram_connected=true`, deep-links to `t.me/<BOT_USERNAME>?start=<user_uuid>`. Top bar with status pulse + **Run pipeline**. **Phase 8 quick-links toolbar** (📅 Calendar follow-ups · 📄 Research docs · Google Docs · 📊 Sent tracker · Sheet) sits immediately under the header — each opens in a new tab against the signed-in user's own Google account; the Sheet button greys out until the user has sent their first email and `ensure_user_sheet` has assigned them an ID. Polls `data/pipeline_progress.json` for the live bar. Primary data source is Supabase (`database.get_most_recent_reports`); falls back to `data/morning_run_<today>.json` (then stale banner). Filter pills (All / Hot / Warm / Nurture / New leads). 40/60 split: lead list with tier accent and badges (NEW / Draft ready / Sent) on the left, detail pane with signal cards on the right. The on-demand **Generate research doc** button (Phase 8) flips in-place to a gold-accented **Open research doc ↗** button the moment the doc exists — same slot, no hunting. Discovered leads have **Approve** / **Dismiss** actions; approved ones get promoted to the watchlist.
 
 ### `pages/3_draft_review.py`
-Breadcrumb back to research. 35/65 split. Left: research brief expander + opening-hook callout + contact info row with inline-editable email field (persists back to `data/watchlist.json` and surfaces an amber warning when the email is blank). Right: tone radio (Direct / Warm / Consultative — auto-regenerates on change), subject + body + LinkedIn editor with colour-coded character counts, four actions: **Regenerate** / **Copy** / **Save to Gmail draft** / **Send now**. Send now: SMTP send → Sheets log → Calendar follow-up created → `tone_learner.archive_sent_draft` → return to research.
+Breadcrumb back to research. 35/65 split. Left: research brief expander + opening-hook callout + contact info row with inline-editable email field (persists back to `data/watchlist.json` and surfaces an amber warning when the email is blank — also disables Send-now until populated). Right: tone radio (Direct / Warm / Consultative — auto-regenerates on change), subject + body + LinkedIn editor with colour-coded character counts, four actions: **Regenerate** / **Copy** / **Save to Gmail draft** / **Send now**. Send now (Phase 8): `gmail_drafts.send_email_now` over the *signed-in user's* Gmail API → `ensure_user_sheet` (lazy-create per-user sheet) → `log_sent_email` → `create_followup_event` on the *signed-in user's* calendar → `tone_learner.archive_sent_draft` → return to research. The pre-Phase-8 SMTP path that used `GMAIL_ADDRESS` / `GMAIL_APP_PASSWORD` is gone — every send leaves from whoever is signed in.
 
 ### `pages/6_sent_tracker.py`
 Reads from Google Sheets via `google_sheets.list_sent`. Custom dark HTML table with status pills, four metric cards (Total / Open rate / Reply rate / Meetings). Empty states for missing credentials or empty spreadsheet.

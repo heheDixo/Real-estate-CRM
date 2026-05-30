@@ -51,6 +51,17 @@ BROKER_EMAIL=michael@hartleycre.com
 # unset to default to just BROKER_EMAIL.
 # BROKER_EMAILS=michael@hartleycre.com,partner@hartleycre.com
 
+# ── Phase 8 — pin the cron's identity ─────────────────
+# The 5am cron has no logged-in user, so it has to pick *some* row in the
+# users table to act as. Without one of these pins, the loader falls
+# through to "row 1" — which silently breaks the moment a second user
+# signs in and gets inserted before the primary broker. Set ONE of:
+#   PRIMARY_USER_ID=<uuid-of-primary-broker>     # exact match (preferred)
+#   PRIMARY_BROKER_EMAIL=michael@hartleycre.com  # email match on users.google_email
+# PRIMARY_USER_ID stays unset by default; the email fallback chain
+# PRIMARY_BROKER_EMAIL → BROKER_EMAIL is enough for a single-broker prod.
+PRIMARY_BROKER_EMAIL=michael@hartleycre.com
+
 # ── Gmail SMTP (alert mirror + Send-now) ──────────────
 GMAIL_SENDER=michael@hartleycre.com
 GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
@@ -123,6 +134,27 @@ Add the real Railway redirect URI to your OAuth client:
 2. Edit your OAuth 2.0 Client ID
 3. Add to **Authorised redirect URIs**: `https://YOUR_API_SERVICE.railway.app/oauth/callback`
 4. **Save**
+
+**Then add the Phase 8 scopes** so the "Generate research doc" button doesn't 403 with `ACCESS_TOKEN_SCOPE_INSUFFICIENT`:
+
+5. **APIs & Services → OAuth consent screen → Scopes → Add or remove scopes** — add:
+   - `https://www.googleapis.com/auth/documents`
+   - `https://www.googleapis.com/auth/drive.file`
+6. **APIs & Services → Library** — confirm **Google Docs API** and **Google Drive API** are both enabled (alongside Gmail, Sheets, Calendar).
+7. **APIs & Services → OAuth consent screen → Test users → Add user** — every email in `ALLOWED_EMAILS` must also be a Test user here until the app moves out of Testing status. Otherwise Google blocks the sign-in before the in-app whitelist check runs.
+
+After a scope change, every user must sign out + sign in again so Google re-issues a token bound to the new scope set. Existing tokens don't silently widen.
+
+### 5b. Supabase — Phase 8 migration
+
+Run once in **Supabase → SQL editor → New query** so each user can have their own per-account Sent-Emails spreadsheet:
+
+```sql
+ALTER TABLE users
+ADD COLUMN IF NOT EXISTS sheets_spreadsheet_id TEXT;
+```
+
+Existing rows get `NULL`; the first Send-now per user lazily creates a sheet in *their* Drive (titled "CRE Outreach — Sent Emails", renamed default tab, headers seeded) and persists the ID here. The scheduler / `gmail_sync` keeps using the single `SHEETS_SPREADSHEET_ID` env-var sheet as the master broker log.
 
 ### 6. Register the Telegram webhook
 

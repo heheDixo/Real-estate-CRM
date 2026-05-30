@@ -86,19 +86,25 @@ If the same article surfaces in both Google News and NewsAPI, the URL-based dedu
 
 `hf_client` now retries every call 3× with 2s/4s/8s exponential backoff, caches scorer results in Supabase (`make_cache_key` on `text[:200]|labels`), and falls back to equal-distribution scores or template drafts when all retries fail. A 4:50am warm-up job pre-pings both models before the 5:00am pipeline. **What's still true:** there is no second inference provider — if the HF router itself goes down across all providers, the template fallback is the only path. Self-hosted Mistral / Llama would close that gap.
 
-### 8. No multi-user / multi-broker **data** support — but recipient fan-out is in (Phase 6)
+### 8. No multi-user / multi-broker **data** support — but every user's *Google actions* now route through their own account (Phase 8)
 
-The pipeline is still single-tenant for data isolation. Tenant-scoped tables have no `user_id` column yet (RLS off — deferred to Phase 4.5). Every signed-in user sees the same watchlist, the same drafts, the same sent log.
+The pipeline is still single-tenant for *data isolation*. Tenant-scoped tables have no `user_id` column yet (RLS off — deferred to Phase 4.5). Every signed-in user sees the same watchlist, the same drafts, the same sent log.
 
-**What Phase 6 did add**:
-- `BROKER_EMAILS` (comma-separated list) — the morning digest fans out to every recipient with isolated try/except per send.
-- `ALERT_EMAILS` (comma-separated list) — failure / warm-up alerts CC every recipient in one SMTP session.
-- `ALLOWED_EMAILS` (was already plural) — multiple Google accounts can sign in.
-- Gmail Drafts + Send Now were already per-user (each user's OAuth token drives `service.users().drafts().create(userId="me")`).
+**Phase 6 added** broker-email fan-out: the morning digest goes to every address in `BROKER_EMAILS`, failure alerts to every address in `ALERT_EMAILS`.
 
-**What's still single by design**:
-- `GMAIL_SENDER` + `GMAIL_APP_PASSWORD` — SMTP authentication needs one auth pair. Failure alerts are sent *from* one mailbox (typically the operator's) *to* `ALERT_EMAILS`. Multi-account SMTP isn't a thing.
-- `AGENT_NAME` / `AGENT_TITLE` / `FIRM_NAME` / `AGENT_EMAIL` / `AGENT_PHONE` — baked into every writer prompt and every fallback signature. Changing them changes who the writer is impersonating across the whole deployment. Per-user identity needs the same Phase 4.5 `user_id` work + a `users.agent_profile` JSONB column.
+**Phase 8 fixed the multi-tenant routing bug** that meant every web user's Google actions (drafts, sends, research-doc creation, sheet rows, calendar follow-ups) were silently landing in the *primary broker's* account regardless of who was signed in. Root cause was that pages were calling `authenticate_gmail()` / `authenticate_sheets()` / `authenticate_calendar()` / `authenticate_docs()` with no `credentials=` argument, so the loader fell through to "row 1 of the users table". Phase 8:
+
+- Every page now reads `_creds = get_google_credentials(_user)` once and passes `credentials=_creds` to every `authenticate_*` call.
+- New `gmail_drafts.send_email_now` posts via the Gmail API as the authenticated user, replacing the Send-now SMTP path that used the single `GMAIL_ADDRESS` / `GMAIL_APP_PASSWORD` env pair.
+- Each user gets their own Sent-Emails spreadsheet in their own Drive (new `users.sheets_spreadsheet_id` column, lazily populated by `ensure_user_sheet` on first send).
+- `CALENDAR_ID=primary` already routed per-user — Phase 8 just removed the local-file gate that was suppressing the calendar block for everyone except the dev.
+- New `PRIMARY_USER_ID` / `PRIMARY_BROKER_EMAIL` env vars pin the cron's identity explicitly so the 5am pipeline still works deterministically as a single broker.
+
+**What's still single by design** (Phase 4.5 work):
+- The morning pipeline itself — discovery, scoring, drafting, dossier creation, digest fan-out — runs as the env-pinned primary broker.
+- `GMAIL_SENDER` + `GMAIL_APP_PASSWORD` — still used by `monitoring.py` for SMTP failure alerts (alerts always come from the ops mailbox).
+- `AGENT_NAME` / `AGENT_TITLE` / `FIRM_NAME` / `AGENT_EMAIL` / `AGENT_PHONE` — baked into every writer prompt and every fallback signature. Per-user identity needs the same Phase 4.5 `user_id` work + a `users.agent_profile` JSONB column.
+- Tenant-scoped tables — every user reads the same watchlist / research_reports / sent_emails / approved_emails / tone_profiles / pipeline_runs / dismissed_leads. Real isolation needs Phase 4.5 (`user_id` column + RLS).
 
 ### 11. LinkedIn signal intermittency (Phase 5)
 

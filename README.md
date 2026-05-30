@@ -180,6 +180,8 @@ All keys live in your local `.env` file and are never shared or hardcoded. Anyth
 | `GOOGLE_REDIRECT_URI` | yes | Default `http://localhost:8000/oauth/callback`; update for deploy |
 | `FASTAPI_URL` / `STREAMLIT_URL` | yes | Sidecar + UI URLs (defaults `localhost:8000` / `localhost:8501`) |
 | `ALLOWED_EMAILS` | recommended | Comma-separated whitelist of emails allowed to complete Google sign-in |
+| `PRIMARY_USER_ID` | optional (Phase 8) | UUID of the `users` row the 5am cron acts as. Wins over everything else. |
+| `PRIMARY_BROKER_EMAIL` | recommended (Phase 8) | Match against `users.google_email` for the cron when `PRIMARY_USER_ID` is unset. Falls back to `BROKER_EMAIL`, then row-1. |
 | `TELEGRAM_BOT_TOKEN` | optional | Morning brief + alerts via Telegram — Phase 4 |
 | `TELEGRAM_BOT_USERNAME` | optional | Bot username (no @) used to build the connect deep link |
 | `APOLLO_API_KEY` | recommended | Apollo.io free tier — Organization Search + People Search |
@@ -275,5 +277,9 @@ The watchlist itself accumulates: discovered leads the broker approved last week
 | "Email addresses must be associated with an active Google Account" when adding a broker as Test user | The email is on Microsoft 365 (Cushman & Wakefield, JLL, CBRE, Newmark — every major CRE firm). Workaround: the broker uses a personal Gmail; signature still says their firm. See [ASSUMPTIONS_AND_IMPROVEMENTS.md](ASSUMPTIONS_AND_IMPROVEMENTS.md) §12. |
 | Streamlit can't import `apscheduler` / `google.oauth2` | You're running the system Python rather than the venv. `source venv/bin/activate` and try again. |
 | `data/morning_run_*.json` missing | The cron hasn't fired yet today. Either wait for 05:00 ET, click **Run pipeline** in the UI, or run `python scheduler.py --once`. |
+| Every web user's drafts / sends / docs land in the *primary broker's* account | Pre-Phase-8 bug. Fixed in Phase 8: every Streamlit page now passes the logged-in user's credentials to `authenticate_*`. If it's still happening after Phase 8 ships, the user dict in `st.session_state["current_user"]` is missing; have them sign out + sign in. |
+| "Generate research doc" button returns 403 `ACCESS_TOKEN_SCOPE_INSUFFICIENT` | The user's OAuth token predates the Phase 8 scope expansion. Sign out, sign in again, accept the new Docs + Drive scopes at the consent screen. Confirm the Google Docs API is enabled under **APIs & Services → Library**. |
+| Sent-tracker page is empty but you definitely just sent an email | The user's `users.sheets_spreadsheet_id` either (a) never got persisted (run the Phase 8 migration: `ALTER TABLE users ADD COLUMN IF NOT EXISTS sheets_spreadsheet_id TEXT;`) or (b) points at a duplicate sheet from before the column existed. Resolution: `UPDATE users SET sheets_spreadsheet_id = NULL WHERE google_email = '<you>';`, trash duplicate "CRE Outreach — Sent Emails" sheets in Drive, send-now once. |
+| Send-now button is greyed out | The lead's `contact_email` is empty. Fill it in the contact-email field on the left pane of the draft-review page — both Gmail draft + Send now light up once an address is present. |
 
 For anything else: check the **API status** strip in the left sidebar — it shows which connectors are live vs degraded.
