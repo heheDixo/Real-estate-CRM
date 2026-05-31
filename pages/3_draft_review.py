@@ -186,7 +186,7 @@ def _regen_for_variant(variant: str) -> dict:
         lead,
         {"company": lead.company,
          "domain":  lead.prospect_id.replace("-", "") + ".com",
-         "city":    "New York",
+         "city":    "Atlanta",
          "sector":  lead.sector},
         injection, variant,
     )

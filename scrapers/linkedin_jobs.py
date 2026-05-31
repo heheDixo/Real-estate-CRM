@@ -184,7 +184,7 @@ def _scrape_attempt(company_name: str, city: str, max_jobs: int) -> List[Dict]:
 
 def scrape_linkedin_jobs(
     company_name: str,
-    city: str = "New York",
+    city: str = "Atlanta",
     max_jobs: int = 10,
 ) -> List[Dict]:
     """
@@ -270,7 +270,7 @@ def summarise_jobs(jobs: List[Dict], company_name: str) -> Dict:
 
 if __name__ == "__main__":
     import json
-    sample = scrape_linkedin_jobs("Cityblock", "New York")
+    sample = scrape_linkedin_jobs("Salesloft", "Atlanta")
     print(json.dumps(sample, indent=2)[:1500])
     print()
-    print(json.dumps(summarise_jobs(sample, "Cityblock"), indent=2))
+    print(json.dumps(summarise_jobs(sample, "Salesloft"), indent=2))

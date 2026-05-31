@@ -386,11 +386,14 @@ COMPANY_STAGE_OPTIONS = [
 ]
 
 GEOGRAPHY_OPTIONS = [
+    "Atlanta",
+    "Georgia",
+    "Buckhead",
+    "Midtown Atlanta",
+    "Sandy Springs",
     "New York",
     "Manhattan",
     "Brooklyn",
-    "New Jersey",
-    "Connecticut",
     "Boston",
     "San Francisco",
     "Los Angeles",

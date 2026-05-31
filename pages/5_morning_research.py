@@ -842,7 +842,7 @@ with right:
                         sel,
                         {"company": sel.company,
                          "domain":  sel.prospect_id.replace("-", "") + ".com",
-                         "city":    "New York",
+                         "city":    "Atlanta",
                          "sector":  sel.sector},
                         injection, "Warm",
                     )

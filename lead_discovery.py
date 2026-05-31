@@ -173,6 +173,8 @@ _COMMON_ENGLISH_CAPS = {
         "Berlin", "Tokyo", "Paris", "Singapore", "Dubai",
         "Atlanta", "Charlotte", "Dallas", "Denver", "Houston",
         "Phoenix", "Philadelphia", "Detroit", "Baltimore", "Portland",
+        "Georgia", "Buckhead", "Midtown", "Midtown Atlanta",
+        "Sandy Springs", "Alpharetta", "Marietta", "Decatur",
         # tech stack tokens
         "Kubernetes", "Docker", "Swift", "Kotlin", "TypeScript",
         "GraphQL", "Postgres", "MongoDB", "Redis", "AWS", "GCP",
@@ -473,12 +475,15 @@ def _newsapi_articles(query: str, max_items: int = 12) -> List[Dict]:
 
 def _builtinnyc_companies(sector_hint: str = "") -> List[str]:
     """
-    Scrape company names from the BuiltInNYC jobs page (free, no key).
+    Scrape company names from the Built In Atlanta jobs page (free, no key).
+
+    (Function name kept for back-compat; source repointed from BuiltInNYC to
+    Built In Atlanta when the target market moved to Atlanta/Georgia.)
 
     Returns the bare company names — we'll feed them through the same
     contact-lookup path as RSS-derived candidates.
     """
-    url = "https://www.builtinnyc.com/jobs"
+    url = "https://www.builtinatlanta.com/jobs"
     try:
         resp = requests.get(
             url,
@@ -547,13 +552,14 @@ def _hn_jobs_companies() -> List[str]:
         _log_error("lead_discovery.hn.thread", exc)
         return []
 
-    nyc_blobs = []
+    _LOCATION_HINTS = ("atlanta", "georgia", ", ga", "buckhead", "midtown")
+    local_blobs = []
     for child in thread.get("children", [])[:200]:
         text = (child.get("text") or "")
-        if "new york" in text.lower() or "nyc" in text.lower():
-            nyc_blobs.append(text)
+        if any(hint in text.lower() for hint in _LOCATION_HINTS):
+            local_blobs.append(text)
 
-    return _extract_companies(nyc_blobs)[:20]
+    return _extract_companies(local_blobs)[:20]
 
 
 # ── Hunter.io contact lookup ────────────────────────────────────────────────
@@ -617,7 +623,7 @@ def _hunter_lookup(domain: str) -> Dict:
 def _icp_queries(icp_profile: Dict) -> List[str]:
     """Build the lead-discovery search queries from the active ICP profile."""
     sectors = icp_profile.get("sectors") or [icp_profile.get("sector", "tech")]
-    geo     = (icp_profile.get("geographies") or ["New York"])[0]
+    geo     = (icp_profile.get("geographies") or ["Atlanta"])[0]
     sector  = sectors[0] if sectors else "tech"
 
     return [
@@ -638,7 +644,7 @@ def discover_new_leads(icp_profile: Dict, max_results: int = 10) -> List[Dict]:
     """
     sector_for_apollo = (icp_profile.get("sectors") or
                          [icp_profile.get("sector", "")])[0]
-    city_for_apollo   = (icp_profile.get("geographies") or ["New York"])[0]
+    city_for_apollo   = (icp_profile.get("geographies") or ["Atlanta"])[0]
 
     queries  = _icp_queries(icp_profile)
     existing = _existing_watchlist_domains()
@@ -700,7 +706,7 @@ def discover_new_leads(icp_profile: Dict, max_results: int = 10) -> List[Dict]:
     sector  = (icp_profile.get("sectors") or
                [icp_profile.get("sector", "tech")])[0]
     profile_id = icp_profile.get("id") or icp_profile.get("name") or "default"
-    geo     = (icp_profile.get("geographies") or ["New York"])[0]
+    geo     = (icp_profile.get("geographies") or ["Atlanta"])[0]
     today   = datetime.date.today().isoformat()
     now_iso = datetime.datetime.now().isoformat()
 
@@ -797,10 +803,10 @@ def dismiss_lead(lead_id: str) -> bool:
 
 if __name__ == "__main__":
     sample_icp = {
-        "id": "tech_saas_nyc",
-        "name": "Tech / SaaS — NYC",
+        "id": "tech_saas_atl",
+        "name": "Tech / SaaS — Atlanta",
         "sectors": ["Technology"],
-        "geographies": ["New York"],
+        "geographies": ["Atlanta"],
     }
     leads = discover_new_leads(sample_icp, max_results=5)
     print(json.dumps(leads, indent=2, default=str))

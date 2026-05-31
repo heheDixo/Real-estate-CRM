@@ -149,7 +149,7 @@ def _gather_signals(prospect: Dict) -> Dict:
 
     company = prospect.get("company", "")
     website = prospect.get("website", "")
-    city    = prospect.get("city", "New York")
+    city    = prospect.get("city", "Atlanta")
 
     bundle = {
         "articles":          [],
@@ -272,7 +272,7 @@ def _generate_draft(report, prospect: Dict,
         contact_title      = report.contact_title,
         contact_email      = report.contact_email,
         contact_linkedin   = report.linkedin_url,
-        city               = prospect.get("city", "New York"),
+        city               = prospect.get("city", "Atlanta"),
         industry           = prospect.get("sector", ""),
         last_funding_type  = "",
         last_funding_amount = 0,
@@ -439,7 +439,7 @@ def _load_active_icp_profile() -> Dict:
     wl = database.get_watchlist(active_only=True)
     active = next((w for w in wl if w.get("active", True)), {})
     sector = active.get("sector") or "Technology"
-    city   = active.get("city")   or "New York"
+    city   = active.get("city")   or "Atlanta"
     name   = active.get("icp_profile") or f"{sector} — {city}"
     return {
         "id":          name,

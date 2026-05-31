@@ -326,7 +326,7 @@ class OutreachWriter:
             subject = subject.replace(artifact, "").strip()
 
         if not subject:
-            subject = "Quick thought on your NYC expansion"
+            subject = "Quick thought on your expansion plans"
 
         return subject, body
 
