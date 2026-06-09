@@ -6,13 +6,27 @@ Fallback pattern used everywhere:
   - Try Supabase first
   - On any exception: log error, fall back to local JSON file
   - Never crash the app because of a database error
+
+Connection layer (June 2026 fix):
+  - Force HTTP/1.1 (http2=False) on the underlying httpx client.
+    The supabase-py default builds postgrest's httpx Client with
+    http2=True (postgrest/_sync/client.py). On HTTP/2 a closed/idle
+    pooled connection raises RemoteProtocolError("Server disconnected")
+    from httpcore/_sync/http2.py:443 AND sticks (the same exception is
+    re-raised on every subsequent request on that connection). HTTP/1.1
+    transparently re-opens dead sockets and does not poison the pool.
+  - Defensive retry: _retry_on_disconnect() rebuilds the singleton and
+    retries once on RemoteProtocolError / ConnectError / ReadError.
 """
 
 import os
 import json
 import hashlib
+import threading
 from datetime import datetime, date
-from typing import Optional
+from typing import Optional, Callable, TypeVar, Any
+
+import streamlit as st  # noqa: F401  (kept for module-level side effects elsewhere)
 
 try:
     from dotenv import load_dotenv
@@ -21,29 +35,150 @@ except ImportError:
     pass
 
 try:
+    import httpx
     from supabase import create_client, Client
-except ImportError:
-    create_client = None
+    from supabase.lib.client_options import SyncClientOptions
+    print("[DEBUG] Supabase import successful")
+except Exception:
+    import traceback
+    print("\n========== SUPABASE IMPORT ERROR ==========")
+    traceback.print_exc()
+    print("===========================================\n")
+    httpx = None  # type: ignore
+    create_client = None  # type: ignore
     Client = None  # type: ignore
+    SyncClientOptions = None  # type: ignore
 
-
-def _supabase_url() -> str:
-    return os.getenv("SUPABASE_URL", "")
-
-
-def _supabase_key() -> str:
-    return os.getenv("SUPABASE_ANON_KEY", "")
 
 DATA_DIR = "data"
 
 
-def _db():
-    if create_client is None:
-        raise ImportError("supabase python client not installed")
-    url, key = _supabase_url(), _supabase_key()
+# ─────────────────────────────────────────
+# Connection layer (singleton + retry)
+# ─────────────────────────────────────────
+
+_db_client: Optional["Client"] = None # type: ignore
+_db_lock = threading.Lock()
+
+# Network errors where the right move is "rebuild the client and try again".
+# Imported lazily inside _is_disconnect() so module load doesn't depend on httpx.
+_DISCONNECT_HINTS = (
+    "Server disconnected",
+    "ConnectionTerminated",
+    "ConnectError",
+    "ReadError",
+    "ReadTimeout",
+    "RemoteProtocolError",
+    "ConnectionResetError",
+    "WriteError",
+)
+
+
+def _is_disconnect(exc: BaseException) -> bool:
+    """Best-effort detection of transport-level disconnects."""
+    if httpx is None:
+        return False
+    if isinstance(
+        exc,
+        (
+            httpx.RemoteProtocolError,
+            httpx.ConnectError,
+            httpx.ReadError,
+            httpx.WriteError,
+            httpx.ReadTimeout,
+            httpx.PoolTimeout,
+        ),
+    ):
+        return True
+    msg = f"{type(exc).__name__}: {exc}"
+    return any(hint in msg for hint in _DISCONNECT_HINTS)
+
+
+def _build_httpx_client():
+    """
+    Build the httpx.Client that supabase-py will use under the hood.
+
+    Critical: http2=False. See module docstring for the rationale.
+    """
+    return httpx.Client(
+        http2=False,
+        timeout=httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=10.0),
+        limits=httpx.Limits(
+            max_connections=20,
+            max_keepalive_connections=10,
+            keepalive_expiry=30.0,  # short keepalive avoids stale sockets
+        ),
+        follow_redirects=True,
+    )
+
+
+def _create_supabase_client() -> "Client": # type: ignore
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_ANON_KEY")
     if not url or not key:
-        raise ValueError("SUPABASE_URL and SUPABASE_ANON_KEY not set")
-    return create_client(url, key)
+        raise ValueError("Missing SUPABASE_URL or SUPABASE_ANON_KEY")
+    if create_client is None or SyncClientOptions is None or httpx is None:
+        raise RuntimeError("Supabase library not importable")
+
+    options = SyncClientOptions(httpx_client=_build_httpx_client())
+    return create_client(url, key, options=options)
+
+
+def _db() -> "Client": # type: ignore
+    """
+    Thread-safe singleton Supabase client.
+    Stable for Streamlit + background threads (scheduler, telegram bot).
+    """
+    global _db_client
+    if _db_client is not None:
+        return _db_client
+    with _db_lock:
+        if _db_client is None:
+            _db_client = _create_supabase_client()
+    return _db_client
+
+
+def reset_db() -> None:
+    """
+    Discard the cached client. The next _db() call will build a fresh one
+    with a fresh httpx connection pool. Called by _retry_on_disconnect().
+    Safe to call from any thread.
+    """
+    global _db_client
+    with _db_lock:
+        old = _db_client
+        _db_client = None
+    if old is not None:
+        # best-effort close — supabase-py's sync client doesn't expose a
+        # public close(), so we close the underlying httpx client directly.
+        try:
+            old.postgrest.session.close()
+        except Exception:
+            pass
+
+
+T = TypeVar("T")
+
+
+def _retry_on_disconnect(fn: Callable[[], T], *, attempts: int = 2) -> T:
+    """
+    Run a DB callable, rebuilding the client and retrying once on a
+    transport-level disconnect. Application-level exceptions (PostgREST
+    errors, 4xx responses, etc.) are NOT retried — they propagate to the
+    caller's existing try/except + JSON fallback.
+    """
+    last_exc: Optional[BaseException] = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if not _is_disconnect(exc) or i == attempts - 1:
+                raise
+            print(f"[DB RETRY] transport disconnect ({type(exc).__name__}), rebuilding client...")
+            reset_db()
+    # Unreachable: loop either returns or raises.
+    raise last_exc  # type: ignore[misc]
 
 
 def _log_error(component: str, error: str) -> None:
@@ -58,7 +193,7 @@ def _log_error(component: str, error: str) -> None:
         log.append({
             "ts": datetime.now().isoformat(),
             "component": component,
-            "error": str(error)
+            "error": str(error),
         })
         log = log[-500:]
         with open(path, "w") as f:
@@ -89,11 +224,13 @@ def _write_json(filename: str, data) -> None:
 
 def get_watchlist(active_only: bool = True) -> list:
     try:
-        db = _db()
-        q = db.table("prospects").select("*")
-        if active_only:
-            q = q.eq("active", True).eq("approved", True).eq("dismissed", False)
-        result = q.order("added_at").execute()
+        def _go():
+            db = _db()
+            q = db.table("prospects").select("*")
+            if active_only:
+                q = q.eq("active", True).eq("approved", True).eq("dismissed", False)
+            return q.order("added_at").execute()
+        result = _retry_on_disconnect(_go)
         return result.data or []
     except Exception as e:
         _log_error("get_watchlist", str(e))
@@ -110,13 +247,12 @@ _PROSPECT_COLUMNS = {
 
 def upsert_prospect(prospect: dict) -> dict:
     try:
-        db = _db()
-        # Filter to known columns so extra fields in JSON (contact_first_name,
-        # website, headcount, etc.) don't trip up PostgREST.
         row = {k: v for k, v in prospect.items() if k in _PROSPECT_COLUMNS}
         if not row.get("id") or not row.get("company"):
             return prospect
-        result = db.table("prospects").upsert(row).execute()
+        result = _retry_on_disconnect(
+            lambda: _db().table("prospects").upsert(row).execute()
+        )
         return result.data[0] if result.data else prospect
     except Exception as e:
         _log_error("upsert_prospect", str(e))
@@ -125,25 +261,29 @@ def upsert_prospect(prospect: dict) -> dict:
 
 def dismiss_prospect(prospect_id: str) -> None:
     try:
-        db = _db()
-        db.table("prospects").update({"dismissed": True, "active": False}).eq("id", prospect_id).execute()
-        db.table("dismissed_leads").upsert({"id": prospect_id}).execute()
+        def _go():
+            db = _db()
+            db.table("prospects").update({"dismissed": True, "active": False}).eq("id", prospect_id).execute()
+            db.table("dismissed_leads").upsert({"id": prospect_id}).execute()
+        _retry_on_disconnect(_go)
     except Exception as e:
         _log_error("dismiss_prospect", str(e))
 
 
 def approve_prospect(prospect_id: str) -> None:
     try:
-        db = _db()
-        db.table("prospects").update({"approved": True}).eq("id", prospect_id).execute()
+        _retry_on_disconnect(
+            lambda: _db().table("prospects").update({"approved": True}).eq("id", prospect_id).execute()
+        )
     except Exception as e:
         _log_error("approve_prospect", str(e))
 
 
 def get_dismissed_ids() -> list:
     try:
-        db = _db()
-        result = db.table("dismissed_leads").select("id").execute()
+        result = _retry_on_disconnect(
+            lambda: _db().table("dismissed_leads").select("id").execute()
+        )
         return [r["id"] for r in (result.data or [])]
     except Exception as e:
         _log_error("get_dismissed_ids", str(e))
@@ -160,7 +300,6 @@ def save_research_report(report) -> str:
     Returns the inserted uuid.
     """
     try:
-        db = _db()
         signals = [
             {
                 "type":        s.type,
@@ -188,10 +327,11 @@ def save_research_report(report) -> str:
             "source":           getattr(report, "source", "watchlist"),
             "run_date":         date.today().isoformat(),
         }
-        result = db.table("research_reports").upsert(
-            row,
-            on_conflict="run_date,prospect_id",
-        ).execute()
+        result = _retry_on_disconnect(
+            lambda: _db().table("research_reports").upsert(
+                row, on_conflict="run_date,prospect_id",
+            ).execute()
+        )
         return result.data[0]["id"] if result.data else ""
     except Exception as e:
         _log_error("save_research_report", str(e))
@@ -201,13 +341,14 @@ def save_research_report(report) -> str:
 def get_todays_reports(run_date: Optional[str] = None) -> list:
     target = run_date or date.today().isoformat()
     try:
-        db = _db()
-        result = (
-            db.table("research_reports")
-            .select("*")
-            .eq("run_date", target)
-            .order("composite_score", desc=True)
-            .execute()
+        result = _retry_on_disconnect(
+            lambda: (
+                _db().table("research_reports")
+                .select("*")
+                .eq("run_date", target)
+                .order("composite_score", desc=True)
+                .execute()
+            )
         )
         return result.data or []
     except Exception as e:
@@ -222,13 +363,14 @@ def get_most_recent_reports() -> list:
     if reports:
         return reports
     try:
-        db = _db()
-        latest = (
-            db.table("research_reports")
-            .select("run_date")
-            .order("run_date", desc=True)
-            .limit(1)
-            .execute()
+        latest = _retry_on_disconnect(
+            lambda: (
+                _db().table("research_reports")
+                .select("run_date")
+                .order("run_date", desc=True)
+                .limit(1)
+                .execute()
+            )
         )
         if latest.data:
             last_date = latest.data[0]["run_date"]
@@ -248,8 +390,9 @@ def get_most_recent_reports() -> list:
 
 def log_sent_email(data: dict) -> str:
     try:
-        db = _db()
-        result = db.table("sent_emails").insert(data).execute()
+        result = _retry_on_disconnect(
+            lambda: _db().table("sent_emails").insert(data).execute()
+        )
         return result.data[0]["id"] if result.data else ""
     except Exception as e:
         _log_error("log_sent_email", str(e))
@@ -260,26 +403,28 @@ def update_email_status(contact_email: str, status: str,
                         reply_content: str = "",
                         reply_date: Optional[str] = None) -> None:
     try:
-        db = _db()
         update = {
-            "status":       status,
-            "reply_date":   reply_date or datetime.now().isoformat(),
+            "status":        status,
+            "reply_date":    reply_date or datetime.now().isoformat(),
             "reply_content": reply_content[:500] if reply_content else "",
         }
-        db.table("sent_emails").update(update).eq("contact_email", contact_email).execute()
+        _retry_on_disconnect(
+            lambda: _db().table("sent_emails").update(update).eq("contact_email", contact_email).execute()
+        )
     except Exception as e:
         _log_error("update_email_status", str(e))
 
 
 def get_sent_emails(limit: int = 100) -> list:
     try:
-        db = _db()
-        result = (
-            db.table("sent_emails")
-            .select("*")
-            .order("sent_at", desc=True)
-            .limit(limit)
-            .execute()
+        result = _retry_on_disconnect(
+            lambda: (
+                _db().table("sent_emails")
+                .select("*")
+                .order("sent_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
         )
         return result.data or []
     except Exception as e:
@@ -294,10 +439,10 @@ def get_email_stats() -> dict:
     replied = sum(1 for e in emails if e.get("status") in ("Replied", "Meeting"))
     meeting = sum(1 for e in emails if e.get("status") == "Meeting")
     return {
-        "total":       total,
-        "open_rate":   round(opened  / total * 100, 1) if total else 0,
-        "reply_rate":  round(replied / total * 100, 1) if total else 0,
-        "meetings":    meeting,
+        "total":      total,
+        "open_rate":  round(opened  / total * 100, 1) if total else 0,
+        "reply_rate": round(replied / total * 100, 1) if total else 0,
+        "meetings":   meeting,
     }
 
 
@@ -318,8 +463,9 @@ DEFAULT_TONE_PROFILE = {
 
 def get_tone_profile() -> dict:
     try:
-        db = _db()
-        result = db.table("tone_profiles").select("profile").eq("id", 1).execute()
+        result = _retry_on_disconnect(
+            lambda: _db().table("tone_profiles").select("profile").eq("id", 1).execute()
+        )
         if result.data:
             return result.data[0]["profile"]
     except Exception as e:
@@ -329,12 +475,13 @@ def get_tone_profile() -> dict:
 
 def save_tone_profile(profile: dict) -> None:
     try:
-        db = _db()
-        db.table("tone_profiles").upsert({
-            "id":         1,
-            "profile":    profile,
-            "updated_at": datetime.now().isoformat(),
-        }).execute()
+        _retry_on_disconnect(
+            lambda: _db().table("tone_profiles").upsert({
+                "id":         1,
+                "profile":    profile,
+                "updated_at": datetime.now().isoformat(),
+            }).execute()
+        )
     except Exception as e:
         _log_error("save_tone_profile", str(e))
     _write_json("tone_profile.json", profile)
@@ -347,13 +494,14 @@ def save_tone_profile(profile: dict) -> None:
 def save_approved_email(subject: str, body: str,
                         company: str, tone_variant: str = "") -> None:
     try:
-        db = _db()
-        db.table("approved_emails").insert({
-            "subject":      subject,
-            "body":         body,
-            "company":      company,
-            "tone_variant": tone_variant,
-        }).execute()
+        _retry_on_disconnect(
+            lambda: _db().table("approved_emails").insert({
+                "subject":      subject,
+                "body":         body,
+                "company":      company,
+                "tone_variant": tone_variant,
+            }).execute()
+        )
     except Exception as e:
         _log_error("save_approved_email", str(e))
     emails = _read_json("approved_emails.json", [])
@@ -365,13 +513,14 @@ def save_approved_email(subject: str, body: str,
 
 def get_approved_emails(limit: int = 50) -> list:
     try:
-        db = _db()
-        result = (
-            db.table("approved_emails")
-            .select("*")
-            .order("saved_at", desc=True)
-            .limit(limit)
-            .execute()
+        result = _retry_on_disconnect(
+            lambda: (
+                _db().table("approved_emails")
+                .select("*")
+                .order("saved_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
         )
         return result.data or []
     except Exception as e:
@@ -388,30 +537,32 @@ def log_pipeline_run(status: str, prospects_count: int,
                      error: str = "", started_at: Optional[str] = None,
                      completed_at: Optional[str] = None) -> None:
     try:
-        db = _db()
-        db.table("pipeline_runs").insert({
-            "run_date":        date.today().isoformat(),
-            "status":          status,
-            "prospects_count": prospects_count,
-            "drafts_count":    drafts_count,
-            "skipped_count":   skipped_count,
-            "error":           error[:500] if error else "",
-            "started_at":      started_at or datetime.now().isoformat(),
-            "completed_at":    completed_at or datetime.now().isoformat(),
-        }).execute()
+        _retry_on_disconnect(
+            lambda: _db().table("pipeline_runs").insert({
+                "run_date":        date.today().isoformat(),
+                "status":          status,
+                "prospects_count": prospects_count,
+                "drafts_count":    drafts_count,
+                "skipped_count":   skipped_count,
+                "error":           error[:500] if error else "",
+                "started_at":      started_at or datetime.now().isoformat(),
+                "completed_at":    completed_at or datetime.now().isoformat(),
+            }).execute()
+        )
     except Exception as e:
         _log_error("log_pipeline_run", str(e))
 
 
 def get_pipeline_runs(limit: int = 30) -> list:
     try:
-        db = _db()
-        result = (
-            db.table("pipeline_runs")
-            .select("*")
-            .order("run_date", desc=True)
-            .limit(limit)
-            .execute()
+        result = _retry_on_disconnect(
+            lambda: (
+                _db().table("pipeline_runs")
+                .select("*")
+                .order("run_date", desc=True)
+                .limit(limit)
+                .execute()
+            )
         )
         return result.data or []
     except Exception as e:
@@ -425,8 +576,9 @@ def get_pipeline_runs(limit: int = 30) -> list:
 
 def get_cached_score(cache_key: str) -> Optional[dict]:
     try:
-        db = _db()
-        result = db.table("score_cache").select("result").eq("cache_key", cache_key).execute()
+        result = _retry_on_disconnect(
+            lambda: _db().table("score_cache").select("result").eq("cache_key", cache_key).execute()
+        )
         if result.data:
             return result.data[0]["result"]
     except Exception as e:
@@ -436,12 +588,13 @@ def get_cached_score(cache_key: str) -> Optional[dict]:
 
 def save_cached_score(cache_key: str, result: dict) -> None:
     try:
-        db = _db()
-        db.table("score_cache").upsert({
-            "cache_key":  cache_key,
-            "result":     result,
-            "created_at": datetime.now().isoformat(),
-        }).execute()
+        _retry_on_disconnect(
+            lambda: _db().table("score_cache").upsert({
+                "cache_key":  cache_key,
+                "result":     result,
+                "created_at": datetime.now().isoformat(),
+            }).execute()
+        )
     except Exception as e:
         _log_error("save_cached_score", str(e))
 
@@ -452,13 +605,14 @@ def make_cache_key(text: str, labels: list) -> str:
 
 
 # ─────────────────────────────────────────
-# USERS (populated later by OAuth — stubs needed now)
+# USERS
 # ─────────────────────────────────────────
 
 def get_user_by_email(email: str) -> Optional[dict]:
     try:
-        db = _db()
-        result = db.table("users").select("*").eq("google_email", email).execute()
+        result = _retry_on_disconnect(
+            lambda: _db().table("users").select("*").eq("google_email", email).execute()
+        )
         return result.data[0] if result.data else None
     except Exception as e:
         _log_error("get_user_by_email", str(e))
@@ -467,8 +621,9 @@ def get_user_by_email(email: str) -> Optional[dict]:
 
 def update_user(user_id: str, data: dict) -> None:
     try:
-        db = _db()
-        db.table("users").update(data).eq("id", user_id).execute()
+        _retry_on_disconnect(
+            lambda: _db().table("users").update(data).eq("id", user_id).execute()
+        )
     except Exception as e:
         _log_error("update_user", str(e))
 
@@ -476,12 +631,13 @@ def update_user(user_id: str, data: dict) -> None:
 def get_all_telegram_users() -> list:
     """Returns all users with Telegram connected — used by scheduler."""
     try:
-        db = _db()
-        result = (
-            db.table("users")
-            .select("id, google_email, telegram_chat_id, sign_off, firm_name")
-            .eq("telegram_connected", True)
-            .execute()
+        result = _retry_on_disconnect(
+            lambda: (
+                _db().table("users")
+                .select("id, google_email, telegram_chat_id, sign_off, firm_name")
+                .eq("telegram_connected", True)
+                .execute()
+            )
         )
         return result.data or []
     except Exception as e:
