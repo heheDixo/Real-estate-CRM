@@ -211,6 +211,16 @@ def _dismissed_ids() -> set:
 # Cache to avoid re-resolving the same domain repeatedly in one run
 _dns_cache: Dict[str, bool] = {}
 
+# Hunter.io per-run budget — prevents a single pipeline run from burning
+# the entire monthly quota (free tier = 25 searches/month).
+_hunter_call_count: int = 0
+_hunter_cache: Dict[str, Dict] = {}   # domain → Hunter API response data
+
+
+def _hunter_budget_available() -> bool:
+    """True if we haven't exhausted the per-run Hunter API call budget."""
+    return _hunter_call_count < config.HUNTER_MAX_CALLS_PER_RUN
+
 
 def _domain_resolves(domain: str) -> bool:
     """
@@ -725,71 +735,57 @@ def _build_domain_candidates(name: str) -> List[str]:
 
 def _resolve_domain(company: str) -> Optional[str]:
     """
-    Resolve a company name to its real domain.
-    1. Try each domain candidate against DNS.
-    2. If Hunter is available, confirm with Hunter (first hit wins).
-    Returns the verified domain or None.
+    Resolve a company name to its real domain using DNS checks.
+    Try each domain candidate against DNS. Returns the first resolving domain or None.
     """
     candidates = _build_domain_candidates(company)
 
-    # Phase 1: DNS check — cheap, no quota used
+    # DNS check — cheap, no quota used
     dns_hits = [d for d in candidates if _domain_resolves(d)]
-    if not dns_hits:
-        return None
-
-    # Phase 2: Hunter confirmation — pick the domain Hunter knows emails for
-    if config.HUNTER_AVAILABLE:
-        for domain in dns_hits:
-            try:
-                resp = requests.get(
-                    "https://api.hunter.io/v2/domain-search",
-                    params={
-                        "domain":  domain,
-                        "api_key": config.HUNTER_API_KEY,
-                        "limit":   1,
-                    },
-                    timeout=8,
-                )
-                if resp.status_code == 429:
-                    break   # quota hit — fall back to first DNS hit
-                if resp.status_code != 200:
-                    continue
-                data = resp.json().get("data") or {}
-                emails = data.get("emails") or []
-                total  = (data.get("meta") or {}).get("total") or 0
-                if emails or total > 0:
-                    return domain
-            except requests.RequestException:
-                continue
-
-    # Phase 3: fallback to first DNS-resolving candidate
     return dns_hits[0] if dns_hits else None
 
 
 def _hunter_lookup(domain: str) -> Dict:
-    """Hunter domain-search for executive contacts on a confirmed domain."""
+    """Hunter domain-search for executive contacts on a confirmed domain.
+
+    Uses the per-run cache populated by _resolve_domain() to avoid making
+    a duplicate API call for the same domain. Falls back to a fresh API
+    call only if the domain wasn't already resolved via Hunter.
+    """
+    global _hunter_call_count
     if not config.HUNTER_AVAILABLE or not domain:
         return {}
-    try:
-        resp = requests.get(
-            "https://api.hunter.io/v2/domain-search",
-            params={
-                "domain":    domain,
-                "api_key":   config.HUNTER_API_KEY,
-                "limit":     5,
-                "seniority": "executive,senior",
-            },
-            timeout=10,
-        )
-    except requests.RequestException as exc:
-        _log_error("lead_discovery.hunter", exc)
-        return {}
-    if resp.status_code != 200:
-        return {}
-    try:
-        data = resp.json().get("data", {})
-    except ValueError:
-        return {}
+
+    # Check cache first — _resolve_domain() already queried this domain
+    data = _hunter_cache.get(domain)
+
+    if data is None:
+        # Not cached — need a fresh API call (if budget allows)
+        if not _hunter_budget_available():
+            return {}
+        try:
+            _hunter_call_count += 1
+            resp = requests.get(
+                "https://api.hunter.io/v2/domain-search",
+                params={
+                    "domain":    domain,
+                    "api_key":   config.HUNTER_API_KEY,
+                    "limit":     5,
+                    "seniority": "executive,senior",
+                },
+                timeout=10,
+            )
+        except requests.RequestException as exc:
+            _log_error("lead_discovery.hunter", exc)
+            return {}
+        if resp.status_code != 200:
+            return {}
+        try:
+            data = resp.json().get("data", {})
+        except ValueError:
+            return {}
+        _hunter_cache[domain] = data
+
     emails = data.get("emails", []) or []
     best = None
     for e in emails:
@@ -909,6 +905,12 @@ def discover_new_leads(icp_profile: Dict, max_results: int = 10) -> List[Dict]:
       G2. RE-intent keyword in originating article (news sources only)
       G3. Hunter.io executive contact on the RESOLVED domain
     """
+    # Reset per-run Hunter budget and caches
+    global _hunter_call_count, _hunter_cache
+    _hunter_call_count = 0
+    _hunter_cache = {}
+    _dns_cache.clear()
+
     sectors   = icp_profile.get("sectors") or [icp_profile.get("sector", "Technology")]
     geo       = (icp_profile.get("geographies") or ["Atlanta"])[0]
     sector    = sectors[0] if sectors else "Technology"
@@ -1065,12 +1067,14 @@ def discover_new_leads(icp_profile: Dict, max_results: int = 10) -> List[Dict]:
             "discovered_at":  now_iso,
             "discovered_via": mention.get("source", source_label),
             "discovery_url":  mention.get("url", ""),
-            "approved":       True,
+            "approved":       False,
             "active":         True,
         })
         if len(candidates) >= max_results:
             break
 
+    stats["hunter_api_calls"] = _hunter_call_count
+    stats["hunter_cache_hits"] = len(_hunter_cache)
     _log_error("lead_discovery.funnel", json.dumps(dict(stats)))
     return candidates
 

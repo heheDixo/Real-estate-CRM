@@ -67,6 +67,10 @@ HUNTER_AVAILABLE    = bool(HUNTER_API_KEY)
 FIRECRAWL_AVAILABLE = bool(FIRECRAWL_API_KEY)
 HF_AVAILABLE        = bool(HF_TOKEN)
 GEMINI_AVAILABLE    = bool(GEMINI_API_KEY)
+# Hard per-run cap on Hunter.io domain-search API calls.
+# Free tier = 25 searches/month; default 10 protects against a single
+# pipeline run obliterating the entire monthly quota.
+HUNTER_MAX_CALLS_PER_RUN = int(os.getenv("HUNTER_MAX_CALLS_PER_RUN", "10"))
 GMAIL_AVAILABLE     = bool(GMAIL_ADDRESS and GMAIL_APP_PASSWORD)
 GOOGLE_OAUTH_AVAILABLE = bool(GOOGLE_CREDENTIALS_PATH) and os.path.exists(GOOGLE_CREDENTIALS_PATH)
 # SEC EDGAR — always available (no auth required)

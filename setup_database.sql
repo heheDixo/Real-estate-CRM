@@ -148,6 +148,15 @@ create table if not exists score_cache (
     created_at   timestamptz default now()
 );
 
+-- 12. OAuth PKCE State Store (survives worker restarts)
+create table if not exists oauth_state (
+    state           text primary key,
+    code_verifier   text not null,
+    created_at      timestamptz default now(),
+    expires_at      timestamptz not null
+);
+
+
 -- Indexes
 create index if not exists idx_sessions_token       on sessions(session_token);
 create index if not exists idx_sessions_expires     on sessions(expires_at);

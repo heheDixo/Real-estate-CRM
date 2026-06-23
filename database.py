@@ -250,6 +250,11 @@ def upsert_prospect(prospect: dict) -> dict:
         row = {k: v for k, v in prospect.items() if k in _PROSPECT_COLUMNS}
         if not row.get("id") or not row.get("company"):
             return prospect
+        if "approved" not in row:
+            if row.get("source") == "discovered":
+                row["approved"] = False
+            else:
+                row["approved"] = True
         result = _retry_on_disconnect(
             lambda: _db().table("prospects").upsert(row).execute()
         )
@@ -344,7 +349,7 @@ def get_todays_reports(run_date: Optional[str] = None) -> list:
         result = _retry_on_disconnect(
             lambda: (
                 _db().table("research_reports")
-                .select("*")
+                .select("*, prospects(approved)")
                 .eq("run_date", target)
                 .order("composite_score", desc=True)
                 .execute()
