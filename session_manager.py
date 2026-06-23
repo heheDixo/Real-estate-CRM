@@ -9,6 +9,7 @@ Used by every Streamlit page.
 import os
 from datetime import datetime
 from typing import Optional
+import json
 
 import streamlit as st
 from google.oauth2.credentials import Credentials
@@ -49,34 +50,67 @@ def require_login() -> dict:
         st.stop()
     return user
 
-
 def get_google_credentials(user: dict) -> Credentials:
     """
     Returns a valid Google Credentials object for this user.
     Auto-refreshes if expired and saves new token back to Supabase.
     """
-    token_data = user.get("google_token") or {}
+
+    token_data = user.get("google_token")
+
+    # Handle missing token
+    if not token_data:
+        token_data = {}
+
+    # Supabase may return JSON as string
+    if isinstance(token_data, str):
+        try:
+            token_data = json.loads(token_data)
+        except Exception:
+            token_data = {}
 
     creds = Credentials(
-        token=         token_data.get("token"),
-        refresh_token= token_data.get("refresh_token"),
-        token_uri=     token_data.get("token_uri", "https://oauth2.googleapis.com/token"),
-        client_id=     token_data.get("client_id"),
-        client_secret= token_data.get("client_secret"),
-        scopes=        token_data.get("scopes") or GOOGLE_SCOPES,
+        token=token_data.get("token"),
+        refresh_token=token_data.get("refresh_token"),
+        token_uri=token_data.get(
+            "token_uri",
+            "https://oauth2.googleapis.com/token"
+        ),
+        client_id=token_data.get("client_id"),
+        client_secret=token_data.get("client_secret"),
+        scopes=token_data.get("scopes") or GOOGLE_SCOPES,
     )
 
+    # Refresh token automatically
     if creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            new_token_data = {**token_data, "token": creds.token}
+
+            new_token_data = {
+                **token_data,
+                "token": creds.token,
+            }
+
             if creds.expiry:
-                new_token_data["expiry"] = creds.expiry.isoformat()
-            update_user(user["id"], {"google_token": new_token_data})
+                new_token_data["expiry"] = (
+                    creds.expiry.isoformat()
+                )
+
+            update_user(
+                user["id"],
+                {"google_token": new_token_data}
+            )
+
             if "current_user" in st.session_state:
-                st.session_state["current_user"]["google_token"] = new_token_data
+                st.session_state[
+                    "current_user"
+                ]["google_token"] = new_token_data
+
         except Exception as e:
-            _log_error("get_google_credentials.refresh", str(e))
+            _log_error(
+                "get_google_credentials.refresh",
+                str(e)
+            )
 
     return creds
 

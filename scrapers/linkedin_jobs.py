@@ -115,7 +115,7 @@ def _scrape_attempt(company_name: str, city: str, max_jobs: int) -> List[Dict]:
             "Upgrade-Insecure-Requests": "1",
         }
 
-        resp = requests.get(url, headers=headers, timeout=15)
+        resp = requests.get(url, headers=headers, timeout=5)
 
         if resp.status_code == 429:
             _log_error(
@@ -190,25 +190,15 @@ def scrape_linkedin_jobs(
     """
     Scrapes LinkedIn public job search for a company.
     Returns list of job dicts. Returns [] on any failure.
-
-    LinkedIn's guest endpoint intermittently returns 200 OK with no rendered
-    job cards (silent rate-limit). On an empty first attempt we sleep 45–90s
-    and retry once with a fresh random User-Agent. This noticeably lifts the
-    success rate without burning quota; sustained failure still falls back to
-    [] cleanly.
-
-    Each job dict:
-    {
-        "title":            str,
-        "location":         str,
-        "posted":           str,
-        "is_office_signal": bool,   # direct CRE signal (spec field)
-        "is_office_role":   bool,   # mirror field consumed by
-                                    # research_agent._build_signal_from_label
-        "is_growth_signal": bool,   # hiring velocity signal
-        "url":              str,
-    }
+    Respects SKIP_LINKEDIN_SCRAPERS env flag.
     """
+    try:
+        import config as _cfg
+        if _cfg.SKIP_LINKEDIN_SCRAPERS:
+            return []
+    except Exception:
+        pass
+
     jobs = _scrape_attempt(company_name, city, max_jobs)
 
     if not jobs:
@@ -219,6 +209,7 @@ def scrape_linkedin_jobs(
         jobs = _scrape_attempt(company_name, city, max_jobs)
 
     return jobs[:max_jobs]
+
 
 
 def get_office_signals(jobs: List[Dict]) -> List[Dict]:

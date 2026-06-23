@@ -52,6 +52,8 @@ _REPORT_FIELDS = {
 def _row_to_report(row: dict) -> ResearchReport:
     """Convert a Supabase research_reports row into a ResearchReport."""
     d = {k: v for k, v in row.items() if k in _REPORT_FIELDS}
+    if "prospects" in row and isinstance(row["prospects"], dict):
+        d["approved"] = row["prospects"].get("approved")
     return ResearchReport.from_dict(d)
 
 

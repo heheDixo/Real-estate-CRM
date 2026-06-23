@@ -15,6 +15,11 @@ APOLLO_API_KEY      = os.getenv("APOLLO_API_KEY", "")
 NEWSAPI_KEY         = os.getenv("NEWSAPI_KEY", "")
 HUNTER_API_KEY      = os.getenv("HUNTER_API_KEY", "")
 FIRECRAWL_API_KEY   = os.getenv("FIRECRAWL_API_KEY", "")
+GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY", "")
+
+# Pipeline skip flags — set to false in .env to enable real APIs
+SKIP_APOLLO              = os.getenv("SKIP_APOLLO", "false").lower() == "true"
+SKIP_LINKEDIN_SCRAPERS   = os.getenv("SKIP_LINKEDIN_SCRAPERS", "false").lower() == "true"
 
 # Gmail (SMTP)
 GMAIL_ADDRESS       = os.getenv("GMAIL_ADDRESS", "")
@@ -56,13 +61,20 @@ AGENCY_ACCENT = "#2ECC71"   # emerald green — positive signals, tier badges
 # ── API availability flags ─────────────────────────────────────────────────
 # Set to True only if the corresponding key is present.
 # Used by connectors to decide: real API vs mock data.
-APOLLO_AVAILABLE    = bool(APOLLO_API_KEY)
+APOLLO_AVAILABLE    = bool(APOLLO_API_KEY) and not SKIP_APOLLO
 NEWSAPI_AVAILABLE   = bool(NEWSAPI_KEY)
 HUNTER_AVAILABLE    = bool(HUNTER_API_KEY)
 FIRECRAWL_AVAILABLE = bool(FIRECRAWL_API_KEY)
 HF_AVAILABLE        = bool(HF_TOKEN)
+GEMINI_AVAILABLE    = bool(GEMINI_API_KEY)
+# Hard per-run cap on Hunter.io domain-search API calls.
+# Free tier = 25 searches/month; default 10 protects against a single
+# pipeline run obliterating the entire monthly quota.
+HUNTER_MAX_CALLS_PER_RUN = int(os.getenv("HUNTER_MAX_CALLS_PER_RUN", "10"))
 GMAIL_AVAILABLE     = bool(GMAIL_ADDRESS and GMAIL_APP_PASSWORD)
 GOOGLE_OAUTH_AVAILABLE = bool(GOOGLE_CREDENTIALS_PATH) and os.path.exists(GOOGLE_CREDENTIALS_PATH)
+# SEC EDGAR — always available (no auth required)
+EDGAR_AVAILABLE     = True
 
 
 # HuggingFace moved the old api-inference.huggingface.co endpoint to the

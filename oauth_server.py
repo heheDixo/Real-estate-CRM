@@ -60,19 +60,11 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/calendar",
-    # Required by the "Generate research doc" button on page 5 and the
-    # scheduler's per-prospect dossier creation. Without these scopes on
-    # the token, docs.documents().create() returns
-    # ACCESS_TOKEN_SCOPE_INSUFFICIENT.
     "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/drive.file",
 ]
 
 
-# In-memory PKCE store — keyed by OAuth `state`, holds the code_verifier
-# generated during /oauth/login so /oauth/callback can complete the exchange.
-# Single-process, fine for local dev and our single-broker prod footprint.
-_PKCE_STORE: dict = {}
 
 
 # ── helpers ─────────────────────────────────────────────
@@ -80,15 +72,22 @@ _PKCE_STORE: dict = {}
 def _make_flow() -> Flow:
     client_config = {
         "web": {
-            "client_id":     GOOGLE_CLIENT_ID,
+            "client_id": GOOGLE_CLIENT_ID,
             "client_secret": GOOGLE_CLIENT_SECRET,
-            "auth_uri":      "https://accounts.google.com/o/oauth2/auth",
-            "token_uri":     "https://oauth2.googleapis.com/token",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
             "redirect_uris": [GOOGLE_REDIRECT_URI],
         }
     }
-    flow = Flow.from_client_config(client_config, scopes=GOOGLE_SCOPES)
+
+    flow = Flow.from_client_config(
+        client_config,
+        scopes=GOOGLE_SCOPES,
+        autogenerate_code_verifier=True,   # PKCE enabled
+    )
+
     flow.redirect_uri = GOOGLE_REDIRECT_URI
+
     return flow
 
 
@@ -105,23 +104,74 @@ def _token_dict(credentials) -> dict:
     }
 
 
+def _store_pkce_state(state: str, code_verifier: str | None) -> None:
+    """Persist the PKCE code_verifier in Supabase keyed by OAuth state.
+
+    Survives process restarts and multiple workers — unlike an in-memory dict.
+    The row is deleted in _pop_pkce_state() after one-time consumption.
+    """
+    if not state or not code_verifier:
+        return
+    try:
+        db = _db()
+        db.table("oauth_state").upsert({
+            "state":         state,
+            "code_verifier": code_verifier,
+            "created_at":    datetime.now().isoformat(),
+            # 10-minute TTL — if the callback never fires, RLS or a cron
+            # can clean up stale rows. Not critical for correctness.
+            "expires_at":    (datetime.now() + timedelta(minutes=10)).isoformat(),
+        }).execute()
+    except Exception as e:
+        _log_error("pkce_store.save", str(e))
+
+
+def _pop_pkce_state(state: str) -> str | None:
+    """Retrieve and delete the PKCE code_verifier for a given OAuth state.
+
+    Returns None if the state was not found (expired or never stored).
+    """
+    if not state:
+        return None
+    try:
+        db = _db()
+        result = (
+            db.table("oauth_state")
+            .select("code_verifier")
+            .eq("state", state)
+            .execute()
+        )
+        if not result.data:
+            return None
+        verifier = result.data[0].get("code_verifier")
+        # One-time consumption — delete after retrieval
+        db.table("oauth_state").delete().eq("state", state).execute()
+        return verifier
+    except Exception as e:
+        _log_error("pkce_store.pop", str(e))
+        return None
+
+
 # ── routes ──────────────────────────────────────────────
 
 @app.get("/oauth/login")
 def oauth_login():
-    """Redirect the user to Google's consent screen."""
+    """Redirect user to Google consent screen."""
+
     flow = _make_flow()
+
     auth_url, state = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
-        prompt="consent",   # ensures refresh_token is always returned
+        prompt="consent",
     )
-    # Persist the auto-generated PKCE verifier so /oauth/callback can
-    # complete the token exchange.
-    if getattr(flow, "code_verifier", None):
-        _PKCE_STORE[state] = flow.code_verifier
-    return RedirectResponse(auth_url)
 
+    # Persist the PKCE code_verifier so oauth_callback can retrieve it.
+    # The state parameter (returned by Google in the callback URL) is
+    # the lookup key. Stored in Supabase so it survives restarts/workers.
+    _store_pkce_state(state, flow.code_verifier or None)
+
+    return RedirectResponse(auth_url)
 
 @app.get("/oauth/callback")
 async def oauth_callback(request: Request):
@@ -142,11 +192,15 @@ async def oauth_callback(request: Request):
 
     try:
         flow = _make_flow()
-        # Restore the PKCE verifier saved during /oauth/login
-        code_verifier = _PKCE_STORE.pop(state, None) if state else None
-        if code_verifier:
-            flow.code_verifier = code_verifier
-        flow.fetch_token(code=code)
+
+        # Retrieve the PKCE code_verifier that was stored during /oauth/login.
+        code_verifier = _pop_pkce_state(state) if state else None
+
+        flow.fetch_token(
+                code=code,
+                timeout=60,
+                code_verifier=code_verifier,
+            )
         credentials = flow.credentials
     except Exception as e:
         _log_error("oauth_callback.fetch_token", str(e))
