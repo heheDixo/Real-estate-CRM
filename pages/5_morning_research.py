@@ -178,10 +178,15 @@ def _run_pipeline_background():
     if _pipeline_is_running():
         return
 
+    # Capture the runner's email here (in the Streamlit thread) — the daemon
+    # thread below can't read st.session_state. The digest is sent to this
+    # address so it lands with whoever clicked "Run pipeline".
+    runner_email = (_user or {}).get("google_email", "")
+
     def _runner():
         try:
             from scheduler import run_morning_pipeline
-            run_morning_pipeline()
+            run_morning_pipeline(triggered_by_email=runner_email)
         except Exception as exc:
             try:
                 err_path = os.path.join("data", "error_log.json")

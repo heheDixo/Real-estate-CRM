@@ -449,11 +449,17 @@ def _load_active_icp_profile() -> Dict:
     }
 
 
-def run_morning_pipeline() -> Dict:
+def run_morning_pipeline(triggered_by_email: str = "") -> Dict:
     """
     Discover new leads, research watchlist + discovered, generate drafts,
     push to Gmail, send digest. Progress is written to
     data/pipeline_progress.json so the UI can show a live bar.
+
+    The morning digest is sent to whoever ran the pipeline:
+      - ``triggered_by_email`` — set when a logged-in user clicks "Run
+        pipeline" in the UI; the digest goes to that user.
+      - empty (cron / ``--once``) — the digest goes to the Google account
+        the pipeline is authenticated as (see the digest step below).
     """
     started_at = datetime.datetime.now()
     summary: Dict = {
@@ -617,12 +623,25 @@ def run_morning_pipeline() -> Dict:
     except ImportError:
         pass
 
-    # ── 6. Broker digest ─────────────────────────────────────────────────
-    # Fan out to every address in BROKER_EMAILS so multiple stakeholders can
-    # subscribe to the morning digest. Each send is isolated — one bad
-    # recipient address doesn't stop the rest from receiving.
+    # ── 6. Digest — goes to whoever ran the pipeline ─────────────────────
+    # UI runs pass the logged-in user's address via ``triggered_by_email``.
+    # For an unattended run (cron / --once) there is no interactive runner,
+    # so we send to the Google account the pipeline is actually authenticated
+    # as — that address is guaranteed real, which avoids bouncing off a demo
+    # placeholder like the old static BROKER_EMAILS list did.
     if service:
-        for recipient in config.BROKER_EMAILS:
+        recipient = (triggered_by_email or "").strip()
+        if not recipient:
+            try:
+                profile = service.users().getProfile(userId="me").execute()
+                recipient = (profile.get("emailAddress") or "").strip()
+            except Exception as exc:
+                _log_error("scheduler.digest.whoami", exc)
+                recipient = (
+                    os.getenv("PRIMARY_BROKER_EMAIL", "").strip()
+                    or config.BROKER_EMAIL
+                )
+        if recipient:
             try:
                 send_morning_digest(service, recipient, reports)
             except Exception as exc:
